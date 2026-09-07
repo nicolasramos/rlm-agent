@@ -120,30 +120,67 @@ function installEditor(key, baseDir) {
 }
 
 // Hermes user plugins are opt-in via `plugins.enabled` in config.yaml. Add the
-// `rlm` plugin to the allow-list so it actually loads.
+// `rlm` plugin to the allow-list so it actually loads. Handles both inline
+// (`enabled: [a, b]`) and block (`enabled:\n  - a\n  - b`) YAML list styles.
 function enableHermesPlugin(base) {
   const configPath = join(base, "config.yaml");
   if (!existsSync(configPath)) {
     throw new Error("Hermes config.yaml not found — plugin installed but not enabled. Run `hermes plugins enable rlm`.");
   }
   let cfg = readFileSync(configPath, "utf-8");
-  // Simple YAML edit: ensure a `plugins:` section with `enabled: [..., rlm]`.
-  // This is intentionally conservative — it only touches the plugins.enabled list.
-  const pluginsRe = /^plugins:\s*$/m;
-  const enabledRe = /^(\s*)enabled:\s*\[(.*?)\]\s*$/m;
-  if (enabledRe.test(cfg)) {
-    cfg = cfg.replace(enabledRe, (m, indent, list) => {
-      const items = list.split(",").map((s) => s.trim()).filter(Boolean);
-      if (!items.includes("rlm")) items.push("rlm");
-      return `${indent}enabled: [${items.join(", ")}]`;
-    });
-  } else if (pluginsRe.test(cfg)) {
-    // plugins: exists but no enabled list — add one under it.
-    cfg = cfg.replace(pluginsRe, "plugins:\n  enabled: [rlm]");
-  } else {
-    cfg += "\nplugins:\n  enabled: [rlm]\n";
+  const lines = cfg.split("\n");
+  let inPlugins = false;
+  let enabledIdx = -1;
+  let enabledIndent = "";
+  let enabledStyle = ""; // "inline" | "block"
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = line.match(/^(\s*)(\S.*)$/);
+    if (!m) continue;
+    const indent = m[1];
+    const content = m[2];
+    if (!inPlugins) {
+      if (content === "plugins:") { inPlugins = true; continue; }
+      continue;
+    }
+    // Inside plugins: section. A key at indent 0 ends it.
+    if (indent.length === 0) break;
+    if (content.startsWith("enabled:")) {
+      enabledIdx = i;
+      enabledIndent = indent;
+      const rest = content.slice("enabled:".length).trim();
+      enabledStyle = rest.startsWith("[") ? "inline" : "block";
+      break;
+    }
   }
-  writeFileSync(configPath, cfg);
+  if (enabledIdx < 0) {
+    // No plugins.enabled — add one under the plugins: section (or create it).
+    const pluginsIdx = lines.findIndex((l) => l.trim() === "plugins:");
+    if (pluginsIdx >= 0) {
+      lines.splice(pluginsIdx + 1, 0, "  enabled: [rlm]");
+    } else {
+      lines.push("", "plugins:", "  enabled: [rlm]");
+    }
+  } else if (enabledStyle === "inline") {
+    const line = lines[enabledIdx];
+    const m = line.match(/^(\s*)enabled:\s*\[(.*?)\]\s*$/);
+    if (m) {
+      const items = m[2].split(",").map((s) => s.trim()).filter(Boolean);
+      if (!items.includes("rlm")) items.push("rlm");
+      lines[enabledIdx] = `${m[1]}enabled: [${items.join(", ")}]`;
+    }
+  } else {
+    // Block style: enabled:\n  - a\n  - b. Add `  - rlm` after the last item.
+    let insertAt = enabledIdx;
+    for (let i = enabledIdx + 1; i < lines.length; i++) {
+      const lm = lines[i].match(/^(\s*)- (.+)$/);
+      if (lm && lm[1].length > enabledIndent.length) { insertAt = i; continue; }
+      break;
+    }
+    const itemIndent = enabledIndent + "  ";
+    lines.splice(insertAt + 1, 0, `${itemIndent}- rlm`);
+  }
+  writeFileSync(configPath, lines.join("\n"));
   console.log("  ✓ enabled in config.yaml (plugins.enabled includes rlm)");
 }
 
