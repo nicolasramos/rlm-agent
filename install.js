@@ -86,6 +86,9 @@ const EDITORS = {
       { src: join(here, "adapters", "hermes", "__init__.py"), dest: join(base, "plugins", "rlm", "__init__.py") },
       { src: join(here, "adapters", "hermes", "plugin.yaml"), dest: join(base, "plugins", "rlm", "plugin.yaml") },
       { src: join(here, "kernel", "kernel.py"), dest: join(base, "plugins", "rlm", "kernel.py") },
+      // Usage skill: the decision rule that tells the agent WHEN to use RLM.
+      // Without it the plugin only describes the tools; the skill activates them.
+      { src: join(here, "adapters", "hermes", "skills", "rlm-usage", "SKILL.md"), dest: join(base, "skills", "agent-workflow", "rlm-usage", "SKILL.md") },
     ],
     restart: "Restart Hermes (or /reset in a session) to load the plugin.",
     postInstall: (base) => enableHermesPlugin(base),

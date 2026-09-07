@@ -34,7 +34,7 @@ rlm-agent-install --editor hermes --dir ~/.hermes
 
 - **OpenCode** → `~/.config/opencode/plugins/rlm.ts` + `rlm-kernel/kernel.py`
 - **PI** → `~/.pi/agent/extensions/rlm.ts` + `rlm-kernel/kernel.py`
-- **Hermes** → `~/.hermes/plugins/rlm/` (plugin + kernel + manifest) and auto-enabled in `config.yaml`
+- **Hermes** → `~/.hermes/plugins/rlm/` (plugin + kernel + manifest), auto-enabled in `config.yaml`, plus the **`rlm-usage` skill** → `~/.hermes/skills/agent-workflow/rlm-usage/` (the decision rule that tells the agent *when* to use RLM — without it the plugin only describes the tools)
 
 Restart the editor (or `/reset` in Hermes) to activate.
 
