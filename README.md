@@ -38,6 +38,14 @@ rlm-agent-install --editor hermes --dir ~/.hermes
 
 Restart the editor (or `/reset` in Hermes) to activate.
 
+## Update
+
+```bash
+rlm-agent-update
+```
+
+Checks the npm registry for a newer version, reinstalls the package, and re-copies the adapter files to every detected editor (default install locations). If you used a custom `--dir` at install time, re-run `rlm-agent-install` manually after updating.
+
 ## Tools
 
 | Tool | What it does | RLM aspect |
