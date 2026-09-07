@@ -1,0 +1,37 @@
+{
+  "name": "rlm-agent",
+  "version": "0.1.0",
+  "description": "RLM (Recursive Language Model) for any editor: persistent Python kernel, context lake, and background subagents that keep large data out of the LLM prompt. One repo, one installer, per-editor adapters.",
+  "type": "module",
+  "main": "install.js",
+  "files": [
+    "kernel",
+    "adapters",
+    "install.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "rlm-agent-install": "install.js"
+  },
+  "scripts": {
+    "test": "python3 tests/test_kernel.py"
+  },
+  "keywords": [
+    "rlm",
+    "recursive-language-model",
+    "opencode",
+    "pi",
+    "pi-mono",
+    "hermes",
+    "hermes-agent",
+    "python",
+    "kernel",
+    "subagents",
+    "context"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
