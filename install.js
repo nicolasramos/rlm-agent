@@ -75,6 +75,9 @@ const EDITORS = {
     files: (base) => [
       { src: join(here, "adapters", "pi", "rlm.ts"), dest: join(base, "extensions", "rlm.ts") },
       { src: join(here, "kernel", "kernel.py"), dest: join(base, "rlm-kernel", "kernel.py") },
+      // Usage rules: the decision rule that tells the agent WHEN to use RLM.
+      // PI loads ~/.pi/agent/AGENTS.md as global context on every session.
+      { src: join(here, "adapters", "pi", "AGENTS.md"), dest: join(base, "AGENTS.md") },
     ],
     restart: "Run /reload in PI to activate.",
   },
