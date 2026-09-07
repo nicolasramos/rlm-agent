@@ -353,6 +353,7 @@ def _arr(desc):
 def register(ctx) -> None:
     """Register all RLM tools. Called once by the Hermes plugin loader."""
     toolset = "rlm"
+    lifecycle = ctx.subagent_lifecycle
 
     def _ipython(args, **kw):
         session_id = kw.get("session_id") or kw.get("task_id") or "default"
@@ -441,18 +442,33 @@ def register(ctx) -> None:
         return f"Restored {len(ev.get('names', []))} variables from {file}."
 
     def _rlm(args, **kw):
-        # Background subagent via Hermes-native delegate_task. The child runs
-        # independently; results arrive later via rlm_result.
+        # Background subagent via the plugin-safe SubagentLifecycleService
+        # (ctx.subagent_lifecycle). delegate_task is an agent-loop tool that
+        # plugins cannot invoke (it requires parent_agent), so the previous
+        # implementation silently never spawned a child and rlm_result stayed
+        # "running" forever. The lifecycle service returns a serializable
+        # SubagentHandle with real state transitions (PENDING/RUNNING/
+        # SUCCEEDED/FAILED) and a result() with the child's summary.
         session_id = kw.get("session_id") or kw.get("task_id") or "default"
         prompt = args.get("prompt", "")
         name = (args.get("name") or prompt[:60]).strip().strip("'\"")[:80]
         try:
-            from tools.delegate_tool import delegate_task
-            child_id = f"rlm-{int(time.time() * 1000)}"
-            delegate_task(tasks=[{"goal": prompt, "context": "RLM child subagent."}], background=True)
-            entry = {"rlm_child_id": child_id, "name": name, "status": "running", "created": int(time.time() * 1000)}
+            from agent.subagent_lifecycle import SubagentLaunchRequest
+            request = SubagentLaunchRequest(
+                goal=prompt,
+                context="RLM child subagent. Respond with the final answer only.",
+                role="leaf",
+            )
+            handle = lifecycle.launch(request)
+            entry = {
+                "rlm_child_id": handle.subagent_id,
+                "name": name,
+                "status": "running",
+                "created": int(time.time() * 1000),
+                "handle": handle.to_dict(),
+            }
             _children.setdefault(session_id, []).append(entry)
-            return json.dumps({"rlm_child_id": child_id, "name": name, "status": "running"})
+            return json.dumps({"rlm_child_id": handle.subagent_id, "name": name, "status": "running"})
         except Exception as e:
             return f"rlm spawn failed: {e}"
 
@@ -461,7 +477,25 @@ def register(ctx) -> None:
         child = args.get("child")
         for c in _children.get(session_id, []):
             if c["rlm_child_id"] == child or c["name"] == child:
-                return json.dumps({"status": c["status"], "rlm_child_id": c["rlm_child_id"]})
+                try:
+                    from agent.subagent_lifecycle import SubagentHandle
+                    handle = SubagentHandle.from_dict(c["handle"])
+                    res = lifecycle.result(handle)
+                    if res.ready:
+                        c["status"] = res.terminal_state.value
+                        c["summary"] = res.summary
+                        c["error"] = res.error_message
+                        return json.dumps({
+                            "status": res.terminal_state.value,
+                            "rlm_child_id": c["rlm_child_id"],
+                            "summary": res.summary,
+                            "error": res.error_message,
+                        })
+                    st = lifecycle.status(handle)
+                    c["status"] = st.state.value
+                    return json.dumps({"status": st.state.value, "rlm_child_id": c["rlm_child_id"]})
+                except Exception as e:
+                    return json.dumps({"status": "error", "rlm_child_id": c["rlm_child_id"], "error": str(e)})
         return f'No RLM child found for "{child}".'
 
     def _rlm_list(args, **kw):
@@ -469,7 +503,19 @@ def register(ctx) -> None:
         lst = _children.get(session_id, [])
         if not lst:
             return "No RLM children in this session."
-        return "\n".join(f"{i + 1}. {c['name']} — {c['rlm_child_id']} — {c['status']}" for i, c in enumerate(lst))
+        lines = []
+        for i, c in enumerate(lst):
+            status = c["status"]
+            if c.get("handle"):
+                try:
+                    from agent.subagent_lifecycle import SubagentHandle
+                    st = lifecycle.status(SubagentHandle.from_dict(c["handle"]))
+                    status = st.state.value
+                    c["status"] = status
+                except Exception:
+                    pass
+            lines.append(f"{i + 1}. {c['name']} — {c['rlm_child_id']} — {status}")
+        return "\n".join(lines)
 
     tools = [
         ("ipython", "Execute Python code in a persistent kernel. Variables, imports, functions and results survive across calls. Use %%bash for shell commands and %cd to change the kernel's working directory. Output is capped and concise.", {"code": _str("Python code to execute in the persistent kernel"), "timeout": _num("Max seconds before the cell is interrupted (default 120)")}, ("code",), _ipython),
