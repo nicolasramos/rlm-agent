@@ -464,7 +464,18 @@ Subagents (RLM children):
 
 - \`rlm\` spawns a background subagent and returns an admission handle immediately — do NOT wait for it. Continue your work; check results later with \`rlm_result\`.
 - \`rlm_list\` shows the children of the current session; \`rlm_delete\` removes one.
-- Children inherit your model, tools and skills. Recursion depth is limited to 2.`
+- Children inherit your model, tools and skills. Recursion depth is limited to 2.
+
+## RLM usage rule (when to use RLM)
+
+Use the RLM tools (ipython kernel, context lake, rlm subagents) when TWO OR MORE of these hold:
+
+- Data is large: > ~10K chars / ~2.5K tokens (long logs, datasets, tool outputs, transcripts).
+- You will access the SAME data more than once (parse → filter → transform → summarize).
+- The task has 3+ steps sharing intermediate state (variables, partial results).
+- The task produces lots of intermediate text you do not need to see in full.
+
+Do NOT use RLM for: 1-2 call tasks (a grep, a read_file, a simple question), or data used once that fits in context. The lake is not a dumpster: only store data you will re-query. Do not spawn subagents for work you can do in 2 calls.`
 
 export const Rlm: Plugin = async ({ client, directory }) => {
   const kernels = new Map<string, Kernel>()
