@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Optional
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -292,6 +293,54 @@ def _snippet(entry, needle, width=160):
         return entry["content"][:width]
     start = max(0, idx - width // 2)
     return ("…" if start > 0 else "") + entry["content"][start:start + width] + "…"
+
+
+# ─── Watch guard (auto context folding) ─────────────────────────────────────
+# ISSUE #5 (rlm-agent): cuando una tool devuelve más de RLM_GUARD_THRESHOLD_CHARS,
+# el guard guarda el output completo en el context lake y entrega al modelo un
+# digest (head+tail + key). El modelo recupera el contenido con rlm_get/rlm_search.
+
+GUARD_THRESHOLD_CHARS = int(os.environ.get("RLM_GUARD_THRESHOLD_CHARS", "10000"))
+GUARD_HEAD_LINES = 40
+GUARD_TAIL_LINES = 10
+GUARD_DISABLED = os.environ.get("RLM_GUARD", "1") == "0"
+_GUARD_MARKER = "[WATCH GUARD]"
+
+
+def _guard_digest(key: str, content: str) -> str:
+    lines = content.splitlines()
+    head = lines[:GUARD_HEAD_LINES]
+    tail = lines[-GUARD_TAIL_LINES:] if len(lines) > GUARD_HEAD_LINES + GUARD_TAIL_LINES else []
+    parts = ["\n".join(head)]
+    if tail:
+        omitted = len(lines) - GUARD_HEAD_LINES - GUARD_TAIL_LINES
+        parts.append(f"\n… [{omitted} líneas omitidas] …\n")
+        parts.append("\n".join(tail))
+    parts.append(
+        f"\n\n{_GUARD_MARKER} Output completo ({len(content):,} chars) guardado en el context lake. "
+        f"Recupera con rlm_get('{key}') o busca con rlm_search/rlm_find."
+    )
+    return "".join(parts)
+
+
+def _on_transform_tool_result(tool_name: str = "", args=None, result=None, status: str = "", **_) -> Optional[str]:
+    """Watch guard: fold oversized tool output into the lake, deliver a digest."""
+    if GUARD_DISABLED:
+        return None
+    if status != "ok" or not isinstance(result, str):
+        return None
+    if len(result) <= GUARD_THRESHOLD_CHARS:
+        return None
+    if _GUARD_MARKER in result[:200]:
+        return None  # ya es un digest — no re-guardar
+    try:
+        key = f"auto/{int(time.time() * 1000)}/{tool_name}"
+        cwd = os.getcwd()
+        lake = _lake_for(cwd)
+        lake.store(key, result, tags=["auto", "watch-guard", tool_name], source="watch_guard")
+        return _guard_digest(key, result)
+    except Exception:
+        return None
 
 
 # ─── Plugin state ────────────────────────────────────────────────────────────
@@ -568,6 +617,7 @@ def register(ctx) -> None:
         return ""
 
     ctx.register_hook("on_session_end", lambda **kw: _cleanup(kw.get("session_id") or "default"))
+    ctx.register_hook("transform_tool_result", _on_transform_tool_result)
 
 
 def _cleanup(session_id):
