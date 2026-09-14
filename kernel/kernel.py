@@ -396,8 +396,8 @@ class _LakeBridge:
             "created": self._entries.get(key, {}).get("created", now),
             "updated": now,
         }
-        self._entries[key] = entry
         self._append(entry)
+        self._entries[key] = entry
         return {"key": key, "chars": len(content), "tags": entry["tags"]}
 
     def get(self, key: str) -> str | None:

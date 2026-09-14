@@ -152,6 +152,69 @@ def test_multiple_prints_same_id():
     print("PASS: test_multiple_prints_same_id")
 
 
+# ─── LakeBridge regression tests ──────────────────────────────────────────────
+
+import importlib.util as _imp_util
+import tempfile
+
+_kernel_path = os.path.join(os.path.dirname(__file__), '..', 'kernel', 'kernel.py')
+_spec = _imp_util.spec_from_file_location("_rlm_kernel", _kernel_path)
+if _spec is None:
+    raise ImportError(f"Could not find module spec for {_kernel_path}")
+_kernel_mod = _imp_util.module_from_spec(_spec)
+if _spec.loader is None:
+    raise ImportError(f"No loader for module spec at {_kernel_path}")
+_spec.loader.exec_module(_kernel_mod)
+_LakeBridge = _kernel_mod._LakeBridge
+
+
+def test_store_failure_does_not_pollute_memory():
+    """Regression: a store() call that fails to write to disk must NOT
+    leave the key in the in-memory cache.  A subsequent get() for that
+    key must return None (or whatever was there before)."""
+
+    lake = _LakeBridge()
+    tmp = tempfile.NamedTemporaryFile(suffix=".jl", delete=False)
+    tmp.close()
+    lake._file = tmp.name
+    lake._loaded = True
+    lake._last_mtime = 9999999999.0
+
+    # Pre-seed the memory cache.
+    lake._entries["existing"] = {"key": "existing", "content": "old"}
+
+    # Patch _append to always raise — simulates disk failure (full, permission, etc.).
+    def failing_append(entry):
+        raise OSError("simulated disk write failure")
+
+    lake._append = failing_append
+
+    # Call store — _append will fail.
+    try:
+        lake.store("boom", "should not persist")
+        stored = True
+    except Exception:
+        stored = False
+
+    # The store call raised; memory cache must still be clean.
+    assert not stored, "store() should have raised"
+    assert "boom" not in lake._entries, (
+        "in-memory cache must NOT be polluted after a failed store"
+    )
+    assert lake.get("existing") == "old", (
+        "pre-existing entries must be untouched"
+    )
+
+    # Verify the on-disk file is also empty (new entry was never written).
+    contents = open(tmp.name, "r").read() if os.path.exists(tmp.name) else ""
+    assert not contents, (
+        "the lake file must NOT contain the failed entry"
+    )
+
+    os.unlink(tmp.name)
+    print("PASS: test_store_failure_does_not_pollute_memory")
+
+
 if __name__ == "__main__":
     tests = [
         test_stdout_carries_request_id,
@@ -159,6 +222,7 @@ if __name__ == "__main__":
         test_bash_cell_stdout_has_id,
         test_error_events_have_id,
         test_multiple_prints_same_id,
+        test_store_failure_does_not_pollute_memory,
     ]
 
     passed = 0
