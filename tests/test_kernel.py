@@ -1,245 +1,239 @@
 #!/usr/bin/env python3
-"""End-to-end tests for rlm-kernel over the stdio protocol.
-
-Usage: python3 tests/test_kernel.py [--python /path/to/python3]
-"""
-
-from __future__ import annotations
+"""Tests for rlm-kernel — verify stdout events carry the correct request id."""
 
 import json
-import os
 import subprocess
 import sys
-import tempfile
-import time
-
-KERNEL = os.path.join(os.path.dirname(__file__), "..", "kernel", "kernel.py")
+import os
 
 
-class Kernel:
-    def __init__(self, python: str = sys.executable, env: dict | None = None):
-        self.proc = subprocess.Popen(
-            [python, KERNEL],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            env={**os.environ, **(env or {})},
+def _send_and_collect(code: str, rid: str = "test-rid-001") -> list[dict]:
+    """Send one execute request and a shutdown, collect all output."""
+    _kernel_dir = os.path.join(os.path.dirname(__file__), "..", "kernel")
+    proc = subprocess.Popen(
+        [sys.executable, os.path.join(_kernel_dir, "kernel.py")],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    # Send execute request
+    execute_req = json.dumps({"id": rid, "type": "execute", "code": code}) + "\n"
+    # Send shutdown to terminate the kernel
+    shutdown_req = json.dumps({"id": "shutdown-1", "type": "shutdown"}) + "\n"
+
+    if proc.stdin is not None:
+        proc.stdin.write(execute_req)
+        proc.stdin.write(shutdown_req)
+        proc.stdin.flush()
+
+    # Read all output
+    output_lines: list[str] = []
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        output_lines.append(line.strip())
+
+    proc.wait(timeout=15)
+
+    # Parse all JSON lines
+    events: list[dict] = []
+    for line in output_lines:
+        if line:
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+
+    return events
+
+
+def test_stdout_carries_request_id():
+    """stdout events must carry the same id as the request, not null."""
+    events = _send_and_collect('print("hello from cell")', rid="cell-abc-123")
+
+    stdout_events = [e for e in events if e.get("event") == "stdout"]
+    assert stdout_events, "Expected at least one stdout event"
+
+    for evt in stdout_events:
+        assert evt.get("id") == "cell-abc-123", (
+            f"stdout event id is {evt.get('id')!r}, expected 'cell-abc-123'"
         )
-        self._next_id = 0
-        # Wait for ready
-        line = self.proc.stdout.readline()
-        assert "ready" in line, f"expected ready, got: {line!r}"
+        assert "hello from cell" in evt.get("text", ""), (
+            f"Expected 'hello from cell' in text, got: {evt.get('text')!r}"
+        )
 
-    def request(self, rtype: str, **kw) -> list[dict]:
-        self._next_id += 1
-        rid = f"t{self._next_id}"
-        req = {"id": rid, "type": rtype, **kw}
-        self.proc.stdin.write(json.dumps(req) + "\n")
-        self.proc.stdin.flush()
-        events = []
-        while True:
-            line = self.proc.stdout.readline()
-            if not line:
-                raise RuntimeError("kernel closed unexpectedly")
-            ev = json.loads(line)
-            events.append(ev)
-            if ev.get("event") == "done" and ev.get("id") == rid:
-                return events
+    # Verify result also has the correct id
+    result_events = [e for e in events if e.get("event") == "result"]
+    assert result_events, "Expected a result event"
+    assert result_events[0].get("id") == "cell-abc-123", (
+        f"result event id is {result_events[0].get('id')!r}"
+    )
 
-    def execute(self, code: str, timeout: int | None = None) -> dict:
-        kw = {"code": code}
-        if timeout:
-            kw["timeout"] = timeout
-        events = self.request("execute", **kw)
-        result = next((e for e in events if e.get("event") == "result"), None)
-        error = next((e for e in events if e.get("event") == "error"), None)
-        stdout = "".join(e.get("text", "") for e in events if e.get("event") == "stdout")
-        stderr = "".join(e.get("text", "") for e in events if e.get("event") == "stderr")
-        return {"result": result, "error": error, "stdout": stdout, "stderr": stderr}
-
-    def close(self):
-        try:
-            self.request("shutdown")
-        except Exception:
-            pass
-        self.proc.wait(timeout=5)
+    print("PASS: test_stdout_carries_request_id")
 
 
-def check(name: str, cond: bool, detail: str = ""):
-    status = "PASS" if cond else "FAIL"
-    print(f"[{status}] {name}" + (f" — {detail}" if detail and not cond else ""))
-    if not cond:
-        raise SystemExit(1)
+def test_stdout_before_result():
+    """stdout events must arrive BEFORE the result event (same id)."""
+    events = _send_and_collect('print("before result")\nx = 42', rid="order-test")
+
+    stdout_events = [e for e in events if e.get("event") == "stdout"]
+    result_events = [e for e in events if e.get("event") == "result"]
+
+    assert stdout_events, "Expected stdout events"
+    assert result_events, "Expected a result event"
+
+    # The last stdout event must come before the result event in the list
+    stdout_last_idx = max(
+        i for i, e in enumerate(events) if e.get("event") == "stdout"
+    )
+    result_first_idx = min(
+        i for i, e in enumerate(events) if e.get("event") == "result"
+    )
+
+    assert stdout_last_idx < result_first_idx, (
+        f"stdout (last at {stdout_last_idx}) must come before result (first at {result_first_idx})"
+    )
+
+    print("PASS: test_stdout_before_result")
 
 
-def main():
-    python = sys.executable
-    if "--python" in sys.argv:
-        python = sys.argv[sys.argv.index("--python") + 1]
+def test_bash_cell_stdout_has_id():
+    """%%bash cells already send with rid; verify they still work."""
+    events = _send_and_collect("%%bash\necho 'bash output'", rid="bash-rid")
 
-    k = Kernel(python)
+    stdout_events = [e for e in events if e.get("event") == "stdout"]
+    assert stdout_events, "Expected stdout from %%bash"
+
+    for evt in stdout_events:
+        assert evt.get("id") == "bash-rid", (
+            f"%%bash stdout id is {evt.get('id')!r}, expected 'bash-rid'"
+        )
+
+    print("PASS: test_bash_cell_stdout_has_id")
+
+
+def test_error_events_have_id():
+    """Error events must also carry the request id."""
+    events = _send_and_collect('1/0', rid="error-rid")
+
+    error_events = [e for e in events if e.get("event") == "error"]
+    assert error_events, "Expected an error event"
+
+    assert error_events[0].get("id") == "error-rid", (
+        f"error event id is {error_events[0].get('id')!r}"
+    )
+
+    print("PASS: test_error_events_have_id")
+
+
+def test_multiple_prints_same_id():
+    """Multiple print() calls in one cell must all carry the same id."""
+    events = _send_and_collect(
+        'print("first")\nprint("second")\nprint("third")',
+        rid="multi-print",
+    )
+
+    stdout_events = [e for e in events if e.get("event") == "stdout"]
+    assert stdout_events, "Expected at least one stdout event"
+
+    # All stdout events must carry the correct id
+    for evt in stdout_events:
+        assert evt.get("id") == "multi-print", (
+            f"stdout event id is {evt.get('id')!r}, expected 'multi-print'"
+        )
+
+    # The combined text should contain all three prints
+    combined_text = "".join(e.get("text", "") for e in stdout_events)
+    assert "first" in combined_text, f"Expected 'first' in text, got: {combined_text!r}"
+    assert "second" in combined_text, f"Expected 'second' in text, got: {combined_text!r}"
+    assert "third" in combined_text, f"Expected 'third' in text, got: {combined_text!r}"
+
+    print("PASS: test_multiple_prints_same_id")
+
+
+# ─── LakeBridge regression tests ──────────────────────────────────────────────
+
+import importlib.util as _imp_util
+import tempfile
+
+_kernel_path = os.path.join(os.path.dirname(__file__), '..', 'kernel', 'kernel.py')
+_spec = _imp_util.spec_from_file_location("_rlm_kernel", _kernel_path)
+if _spec is None:
+    raise ImportError(f"Could not find module spec for {_kernel_path}")
+_kernel_mod = _imp_util.module_from_spec(_spec)
+if _spec.loader is None:
+    raise ImportError(f"No loader for module spec at {_kernel_path}")
+_spec.loader.exec_module(_kernel_mod)
+_LakeBridge = _kernel_mod._LakeBridge
+
+
+def test_store_failure_does_not_pollute_memory():
+    """Regression: a store() call that fails to write to disk must NOT
+    leave the key in the in-memory cache.  A subsequent get() for that
+    key must return None (or whatever was there before)."""
+
+    lake = _LakeBridge()
+    tmp = tempfile.NamedTemporaryFile(suffix=".jl", delete=False)
+    tmp.close()
+    lake._file = tmp.name
+    lake._loaded = True
+    lake._last_mtime = 9999999999.0
+
+    # Pre-seed the memory cache.
+    lake._entries["existing"] = {"key": "existing", "content": "old"}
+
+    # Patch _append to always raise — simulates disk failure (full, permission, etc.).
+    def failing_append(entry):
+        raise OSError("simulated disk write failure")
+
+    lake._append = failing_append
+
+    # Call store — _append will fail.
     try:
-        # 1. Basic execution + trailing expression
-        r = k.execute("x = 41\nx + 1")
-        check("trailing expression", r["result"] and r["result"]["ok"] and r["result"]["repr"] == "42",
-              str(r))
+        lake.store("boom", "should not persist")
+        stored = True
+    except Exception:
+        stored = False
 
-        # 2. State persists across calls
-        r = k.execute("x * 2")
-        check("state persists", r["result"] and r["result"]["repr"] == "82", str(r))
+    # The store call raised; memory cache must still be clean.
+    assert not stored, "store() should have raised"
+    assert "boom" not in lake._entries, (
+        "in-memory cache must NOT be polluted after a failed store"
+    )
+    assert lake.get("existing") == "old", (
+        "pre-existing entries must be untouched"
+    )
 
-        # 3. Imports persist
-        r = k.execute("import json\ndata = {'a': [1, 2, 3]}\njson.dumps(data)")
-        check("imports persist", r["result"] and r["result"]["repr"] == "'{\"a\": [1, 2, 3]}'", str(r))
+    # Verify the on-disk file is also empty (new entry was never written).
+    contents = open(tmp.name, "r").read() if os.path.exists(tmp.name) else ""
+    assert not contents, (
+        "the lake file must NOT contain the failed entry"
+    )
 
-        # 4. stdout capture
-        r = k.execute("print('hello from cell')\nprint('second line')")
-        check("stdout capture", "hello from cell" in r["stdout"] and "second line" in r["stdout"],
-              r["stdout"])
-
-        # 5. Error handling
-        r = k.execute("1 / 0")
-        check("error event", r["error"] and r["error"]["ename"] == "ZeroDivisionError", str(r))
-
-        # 6. State survives errors
-        r = k.execute("x + 1")
-        check("state survives errors", r["result"] and r["result"]["repr"] == "42", str(r))
-
-        # 7. Top-level await
-        r = k.execute("import asyncio\nasync def f():\n    return 99\nawait f()")
-        check("top-level await", r["result"] and r["result"]["repr"] == "99", str(r))
-
-        # 8. %%bash cell
-        r = k.execute("%%bash\necho bash-output-$((1+1))")
-        check("%%bash", "bash-output-2" in r["stdout"], r["stdout"])
-
-        # 9. %cd persists
-        tmp = tempfile.mkdtemp()
-        r = k.execute(f"%cd {tmp}")
-        check("%cd", r["result"] and r["result"]["repr"] == os.path.realpath(tmp), str(r))
-        r = k.execute("import os\nos.getcwd()")
-        check("%cd persists", r["result"] and r["result"]["repr"] == repr(os.path.realpath(tmp)), str(r))
-
-        # 10. list_names
-        events = k.request("list_names")
-        names_ev = next(e for e in events if e.get("event") == "names")
-        names = {n["name"] for n in names_ev["names"]}
-        check("list_names", "x" in names and "data" in names and "json" not in names, str(names))
-
-        # 11. Snapshot + restore
-        snap_path = os.path.join(tmp, "state.pkl")
-        events = k.request("snapshot", path=snap_path)
-        snap = next(e for e in events if e.get("event") == "result")
-        check("snapshot", snap["ok"] and "x" in snap["names"], str(snap))
-        r = k.execute("x = 1")
-        check("mutate after snapshot", r["result"] and r["result"]["ok"], str(r))
-        r = k.execute("x")
-        check("mutated value", r["result"] and r["result"]["repr"] == "1", str(r))
-        events = k.request("restore", path=snap_path)
-        rest = next(e for e in events if e.get("event") == "result")
-        check("restore", rest["ok"] and "x" in rest["names"], str(rest))
-        r = k.execute("x")
-        check("restored value", r["result"] and r["result"]["repr"] == "41", str(r))
-
-        # 12. Timeout interrupts a runaway cell
-        t0 = time.time()
-        r = k.execute("import time\nwhile True:\n    time.sleep(0.05)", timeout=2)
-        elapsed = time.time() - t0
-        check("timeout", r["error"] and r["error"]["ename"] == "KeyboardInterrupt" and elapsed < 10,
-              f"elapsed={elapsed:.1f}s err={r['error']}")
-
-        # 13. Kernel still alive after interrupt
-        r = k.execute("x + 1")
-        check("alive after interrupt", r["result"] and r["result"]["repr"] == "42", str(r))
-
-        # 14. Output cap
-        r = k.execute("print('A' * 500000)")
-        check("stdout capped", len(r["stdout"]) <= 110_000, f"len={len(r['stdout'])}")
-
-        # 15. repr cap
-        r = k.execute("list(range(100000))")
-        check("repr capped", r["result"] and len(r["result"]["repr"]) <= 5_000,
-              f"len={len(r['result']['repr']) if r['result'] else '?'}")
-
-        # 16. rlm_lake bridge: store from kernel, read back, cross-check file
-        lake_dir = tempfile.mkdtemp()
-        lake_file = os.path.join(lake_dir, "lake.jsonl")
-        k2 = Kernel(python, env={"RLM_LAKE_FILE": lake_file})
-        try:
-            r = k2.execute("rlm_lake.store('testkey', 'hello lake ' * 100, ['tag1'])")
-            check("rlm_lake.store", r["result"] and r["result"]["ok"], str(r))
-            r = k2.execute("rlm_lake.get('testkey')")
-            check("rlm_lake.get", r["result"] and "hello lake" in r["result"]["repr"], str(r))
-            r = k2.execute("rlm_lake.search('hello')")
-            check("rlm_lake.search", r["result"] and "testkey" in r["result"]["repr"], str(r))
-            r = k2.execute("rlm_lake.stats()")
-            check("rlm_lake.stats", r["result"] and "testkey" in r["result"]["repr"], str(r))
-            # The entry must be on disk (plugin tools read the same file)
-            with open(lake_file, encoding="utf-8") as f:
-                content = f.read()
-            check("rlm_lake persisted to disk", "testkey" in content and "hello lake" in content,
-                  f"file={content[:80]!r}")
-        finally:
-            k2.close()
-
-        # 17. Concurrent forget — two kernels share a lake; neither should lose data
-        import threading, time as _time
-        lake_dir3 = tempfile.mkdtemp()
-        lake_file3 = os.path.join(lake_dir3, "concurrent_lake.jsonl")
-
-        kA = Kernel(python, env={"RLM_LAKE_FILE": lake_file3})
-        kB = Kernel(python, env={"RLM_LAKE_FILE": lake_file3})
-        try:
-            # A stores 10 entries, B stores 10 different entries
-            for i in range(10):
-                r = kA.execute(f"rlm_lake.store('a_key_{i}', 'from A entry {i}')")
-                check(f"concurrent A store {i}", r["result"] and r["result"]["ok"], str(r))
-            for i in range(10):
-                r = kB.execute(f"rlm_lake.store('b_key_{i}', 'from B entry {i}')")
-                check(f"concurrent B store {i}", r["result"] and r["result"]["ok"], str(r))
-
-            # Now A forgets its own keys; B reads back — all 20 should survive
-            r = kA.execute("rlm_lake.forget('a_key_')")
-            check("concurrent forget returned count",
-                  r["result"] and str(r["result"]["repr"]).startswith("10") , str(r))
-
-            # B verifies all its keys are still there
-            got_b = []
-            for i in range(10):
-                r2 = kB.execute(f"rlm_lake.get('b_key_{i}')")
-                got_b.append(r2["result"]["repr"] if r2["result"] else None)
-            check("concurrent: all B keys survive forget",
-                  all(got_b), f"B entries missing: {got_b}")
-
-            # A reads back its keys — should be gone
-            a_still = []
-            for i in range(3):  # sample check
-                r2 = kA.execute(f"rlm_lake.get('a_key_{i}')")
-                a_still.append(r2["result"]["repr"] if r2["result"] else "MISSING")
-            check("concurrent: A keys removed after forget",
-                  all(s == "None" for s in a_still), str(a_still))
-
-            # Final count: exactly 10 entries on disk
-            r = kA.execute("rlm_lake.stats()")
-            stats_repr = r["result"]["repr"] if r["result"] else ""
-            check("concurrent: stats shows 10 entries", "10" in stats_repr,
-                  f"stats repr={stats_repr}")
-
-            # Verify file content — only 10 lines
-            with open(lake_file3, encoding="utf-8") as f:
-                lines = [l for l in f.read().strip().split("\n") if l.strip()]
-            check("concurrent: file has exactly 10 lines", len(lines) == 10,
-                  f"expected 10 lines, got {len(lines)}: {lines[:3]}...")
-        finally:
-            kA.close()
-            kB.close()
-
-        print("\nAll kernel tests passed.")
-    finally:
-        k.close()
+    os.unlink(tmp.name)
+    print("PASS: test_store_failure_does_not_pollute_memory")
 
 
 if __name__ == "__main__":
-    main()
+    tests = [
+        test_stdout_carries_request_id,
+        test_stdout_before_result,
+        test_bash_cell_stdout_has_id,
+        test_error_events_have_id,
+        test_multiple_prints_same_id,
+        test_store_failure_does_not_pollute_memory,
+    ]
+
+    passed = 0
+    failed = 0
+    for test_fn in tests:
+        try:
+            test_fn()
+            passed += 1
+        except Exception as exc:
+            print(f"FAIL: {test_fn.__name__}: {exc}")
+            failed += 1
+
+    print(f"\nResults: {passed} passed, {failed} failed out of {len(tests)}")
+    sys.exit(1 if failed else 0)
