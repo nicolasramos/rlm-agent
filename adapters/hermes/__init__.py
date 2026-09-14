@@ -70,7 +70,11 @@ def _python_bin() -> str:
 
 def _lake_file_for(project_dir: str) -> Path:
     import hashlib
-    h = hashlib.sha256(project_dir.encode()).hexdigest()[:16]
+    import os
+    # Normalize the project path so that a trailing slash, a symlink, or a
+    # relative path resolves to the SAME lake file for the same real directory.
+    normalized = os.path.realpath(os.path.abspath(project_dir.rstrip("/")))
+    h = hashlib.sha256(normalized.encode()).hexdigest()[:16]
     return Path.home() / ".hermes" / "rlm-state" / "lake" / f"{h}.jsonl"
 
 
@@ -131,14 +135,20 @@ class Kernel:
             if p:
                 p["value"] = ev
                 p["event"].set()
-
+        elif ev.get("event") in ("stdout", "stderr") and ev.get("id"):
+            # Accumulate output attributed to the currently pending request.
+            with self._lock:
+                p = self.pending.get(ev.get("id"))
+            if p is not None:
+                p["output"].append(ev.get("text", ""))
+    
     def _request(self, req_type: str, payload=None, timeout_ms=HARD_TIMEOUT_MS):
         if self.closed:
             raise RuntimeError("kernel is not running")
         with self._lock:
             self.next_id += 1
             rid = f"k{self.next_id}"
-            fut = {"event": threading.Event(), "value": None}
+            fut = {"event": threading.Event(), "value": None, "output": []}
             self.pending[rid] = fut
         body = {"id": rid, "type": req_type, **(payload or {})}
         try:
@@ -152,27 +162,29 @@ class Kernel:
             with self._lock:
                 self.pending.pop(rid, None)
             raise RuntimeError(f"kernel request timed out after {timeout_ms}ms")
-        return fut["value"]
+        return fut
 
     def execute(self, code: str, timeout=DEFAULT_TIMEOUT):
-        ev = self._request("execute", {"code": code, "timeout": timeout})
+        fut = self._request("execute", {"code": code, "timeout": timeout})
+        ev = fut["value"]
+        output = "".join(fut["output"])
         return {
             "ok": ev.get("event") == "result" and ev.get("ok") is not False,
             "result": ev if ev.get("event") == "result" else None,
             "error": ev if ev.get("event") == "error" else None,
-            "stdout": "",
+            "stdout": output,
             "stderr": "",
         }
 
     def list_names(self):
-        ev = self._request("list_names")
+        ev = self._request("list_names")["value"]
         return ev.get("names", [])
 
     def snapshot(self, file: str):
-        return self._request("snapshot", {"path": file})
+        return self._request("snapshot", {"path": file})["value"]
 
     def restore(self, file: str):
-        return self._request("restore", {"path": file})
+        return self._request("restore", {"path": file})["value"]
 
     def shutdown(self):
         if self.closed:
