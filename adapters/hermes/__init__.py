@@ -228,11 +228,11 @@ class ContextLake:
             f.write(json.dumps(entry) + "\n")
 
     def _rewrite(self):
-        # Re-read the file to get all entries written by other processes,
-        # then apply local mutations (stores and forgets).
+        # Read current state from disk, then re-read just before writing
+        # (F-2 alignment: pick up concurrent writes from kernel/other processes).
         self.file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Start with a fresh read of all entries on disk
+        # Initial read — baseline of disk entries.
         all_entries = {}
         for line in self.file.read_text().splitlines():
             if not line.strip():
@@ -244,12 +244,25 @@ class ContextLake:
             except Exception:
                 pass
 
-        # Apply local mutations from self.entries
-        for k, e in self.entries.items():
-            all_entries[k] = e
+        # Re-read JUST BEFORE writing to capture any concurrent writes.
+        fresh = {}
+        for line in self.file.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+                if e.get("key"):
+                    fresh[e["key"]] = e
+            except Exception:
+                pass
+        all_entries = fresh
 
-        # Write out the merged result — deletions from forget()
-        # are keys NOT in self.entries, so they simply don't appear.
+        # Remove forgotten keys — only delete entries no longer in self.entries.
+        # Do NOT overwrite with stale local cache; disk is source of truth.
+        for k in list(all_entries.keys()):
+            if k not in self.entries:
+                del all_entries[k]
+
         lines = [json.dumps(e) for e in all_entries.values()]
         self.file.write_text("\n".join(lines) + ("\n" if lines else ""))
 
