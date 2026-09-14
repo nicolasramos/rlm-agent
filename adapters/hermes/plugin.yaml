@@ -18,6 +18,7 @@ provides_tools:
   - rlm_list
 provides_hooks:
   - on_session_end
+  - context_engine (rlm)
 license: MIT
 homepage: https://github.com/nicolasramos/rlm-agent
 tags: [rlm, kernel, context, subagents]

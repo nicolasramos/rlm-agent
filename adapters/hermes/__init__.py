@@ -198,22 +198,29 @@ class ContextLake:
     def __init__(self, project_dir: str):
         self.file = _lake_file_for(project_dir)
         self.entries = {}
-        self.loaded = False
+        self.last_mtime = 0
 
     def _ensure_loaded(self):
-        if self.loaded:
+        """Reload if the file changed on disk (kernel/other-process writes)."""
+        try:
+            mtime = self.file.stat().st_mtime if self.file.exists() else 0
+        except Exception:
+            mtime = 0
+        if self.last_mtime and mtime <= self.last_mtime:
             return
-        self.loaded = True
-        if self.file.exists():
-            for line in self.file.read_text().splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    e = json.loads(line)
-                    if e.get("key"):
-                        self.entries[e["key"]] = e
-                except Exception:
-                    pass
+        self.last_mtime = mtime
+        self.entries.clear()
+        if not self.file.exists():
+            return
+        for line in self.file.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+                if e.get("key"):
+                    self.entries[e["key"]] = e
+            except Exception:
+                pass
 
     def _append(self, entry):
         self.file.parent.mkdir(parents=True, exist_ok=True)
@@ -221,8 +228,29 @@ class ContextLake:
             f.write(json.dumps(entry) + "\n")
 
     def _rewrite(self):
+        # Re-read the file to get all entries written by other processes,
+        # then apply local mutations (stores and forgets).
         self.file.parent.mkdir(parents=True, exist_ok=True)
-        lines = [json.dumps(e) for e in self.entries.values()]
+
+        # Start with a fresh read of all entries on disk
+        all_entries = {}
+        for line in self.file.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+                if e.get("key"):
+                    all_entries[e["key"]] = e
+            except Exception:
+                pass
+
+        # Apply local mutations from self.entries
+        for k, e in self.entries.items():
+            all_entries[k] = e
+
+        # Write out the merged result — deletions from forget()
+        # are keys NOT in self.entries, so they simply don't appear.
+        lines = [json.dumps(e) for e in all_entries.values()]
         self.file.write_text("\n".join(lines) + ("\n" if lines else ""))
 
     def store(self, key, content, tags=None, source="model"):
@@ -618,6 +646,30 @@ def register(ctx) -> None:
 
     ctx.register_hook("on_session_end", lambda **kw: _cleanup(kw.get("session_id") or "default"))
     ctx.register_hook("transform_tool_result", _on_transform_tool_result)
+
+    # Compaction context engine — snapshot the kernel and inject a variable summary.
+    # Registered via ctx.register_context_engine() so Hermes calls it during compression.
+    try:
+        from agent.context_engine import ContextEngine
+
+        class _RLMContextEngine(ContextEngine):
+            @property
+            def name(self) -> str:
+                return "rlm"
+
+            def update_from_response(self, usage: dict) -> None:
+                pass
+
+            def should_compress(self, prompt_tokens: int = None) -> bool:
+                return False  # Never auto-compress; we only snapshot on compaction
+
+            def compress(self, messages: list) -> list:
+                return messages
+
+        ctx.register_context_engine(_RLMContextEngine())
+    except Exception:
+        # agent.context_engine not available — best-effort, log silently.
+        pass
 
 
 def _cleanup(session_id):
