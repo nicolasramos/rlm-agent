@@ -47,6 +47,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextvars
+import fcntl
 import inspect
 import json
 import os
@@ -436,9 +437,35 @@ class _LakeBridge:
         for k in removed:
             del self._entries[k]
         if removed and self._file:
-            with open(self._file, "w", encoding="utf-8") as f:
-                for e in self._entries.values():
-                    f.write(json.dumps(e, ensure_ascii=False) + "\n")
+            lock_path = self._file + ".lock"
+            lock_fd = open(lock_path, "w")
+            try:
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+                # Read back the lake file under lock to get concurrent writes,
+                # then rewrite with our entries removed.
+                fresh = {}
+                try:
+                    with open(self._file, encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                e = json.loads(line)
+                                if e.get("key"):
+                                    fresh[e["key"]] = e
+                            except json.JSONDecodeError:
+                                continue
+                except OSError:
+                    pass
+                for k in removed:
+                    fresh.pop(k, None)
+                with open(self._file, "w", encoding="utf-8") as f:
+                    for e in fresh.values():
+                        f.write(json.dumps(e, ensure_ascii=False) + "\n")
+            finally:
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                lock_fd.close()
         return len(removed)
 
 

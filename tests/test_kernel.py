@@ -184,6 +184,58 @@ def main():
         finally:
             k2.close()
 
+        # 17. Concurrent forget — two kernels share a lake; neither should lose data
+        import threading, time as _time
+        lake_dir3 = tempfile.mkdtemp()
+        lake_file3 = os.path.join(lake_dir3, "concurrent_lake.jsonl")
+
+        kA = Kernel(python, env={"RLM_LAKE_FILE": lake_file3})
+        kB = Kernel(python, env={"RLM_LAKE_FILE": lake_file3})
+        try:
+            # A stores 10 entries, B stores 10 different entries
+            for i in range(10):
+                r = kA.execute(f"rlm_lake.store('a_key_{i}', 'from A entry {i}')")
+                check(f"concurrent A store {i}", r["result"] and r["result"]["ok"], str(r))
+            for i in range(10):
+                r = kB.execute(f"rlm_lake.store('b_key_{i}', 'from B entry {i}')")
+                check(f"concurrent B store {i}", r["result"] and r["result"]["ok"], str(r))
+
+            # Now A forgets its own keys; B reads back — all 20 should survive
+            r = kA.execute("rlm_lake.forget('a_key_')")
+            check("concurrent forget returned count",
+                  r["result"] and str(r["result"]["repr"]).startswith("10") , str(r))
+
+            # B verifies all its keys are still there
+            got_b = []
+            for i in range(10):
+                r2 = kB.execute(f"rlm_lake.get('b_key_{i}')")
+                got_b.append(r2["result"]["repr"] if r2["result"] else None)
+            check("concurrent: all B keys survive forget",
+                  all(got_b), f"B entries missing: {got_b}")
+
+            # A reads back its keys — should be gone
+            a_still = []
+            for i in range(3):  # sample check
+                r2 = kA.execute(f"rlm_lake.get('a_key_{i}')")
+                a_still.append(r2["result"]["repr"] if r2["result"] else "MISSING")
+            check("concurrent: A keys removed after forget",
+                  all(s == "None" for s in a_still), str(a_still))
+
+            # Final count: exactly 10 entries on disk
+            r = kA.execute("rlm_lake.stats()")
+            stats_repr = r["result"]["repr"] if r["result"] else ""
+            check("concurrent: stats shows 10 entries", "10" in stats_repr,
+                  f"stats repr={stats_repr}")
+
+            # Verify file content — only 10 lines
+            with open(lake_file3, encoding="utf-8") as f:
+                lines = [l for l in f.read().strip().split("\n") if l.strip()]
+            check("concurrent: file has exactly 10 lines", len(lines) == 10,
+                  f"expected 10 lines, got {len(lines)}: {lines[:3]}...")
+        finally:
+            kA.close()
+            kB.close()
+
         print("\nAll kernel tests passed.")
     finally:
         k.close()
