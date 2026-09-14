@@ -503,22 +503,32 @@ def _handle_request(req: dict[str, Any]) -> None:
                 timer = threading.Timer(timeout, _deliver_sigint)
                 timer.daemon = True
                 timer.start()
+            _current_cell.set(rid)
             try:
                 result = _run_cell(code, rid)
+                # Flush captured stdout/stderr BEFORE sending result so
+                # events arrive in the correct order with the right id.
+                sys.stdout.flush()  # type: ignore[attr-defined]
+                sys.stderr.flush()  # type: ignore[attr-defined]
                 if result.get("ok"):
                     _send({"event": "result", "id": rid, **result})
                 else:
                     _send({"event": "error", "id": rid, **result})
             except KeyboardInterrupt:
+                sys.stdout.flush()  # type: ignore[attr-defined]
+                sys.stderr.flush()  # type: ignore[attr-defined]
                 _send({"event": "error", "id": rid, "ename": "KeyboardInterrupt",
                        "evalue": "cell interrupted", "traceback": ["KeyboardInterrupt\n"]})
             except BaseException as exc:  # noqa: BLE001
+                sys.stdout.flush()  # type: ignore[attr-defined]
+                sys.stderr.flush()  # type: ignore[attr-defined]
                 te = traceback.TracebackException.from_exception(exc)
                 _send({"event": "error", "id": rid, "ename": type(exc).__name__,
                        "evalue": _safe_str(exc), "traceback": list(te.format())})
             finally:
                 if timer:
                     timer.cancel()
+                _current_cell.set(None)
         elif rtype == "interrupt":
             _deliver_sigint()
         elif rtype == "snapshot":
