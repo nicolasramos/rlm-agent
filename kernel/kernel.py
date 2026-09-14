@@ -141,6 +141,14 @@ class _StreamWriter:
         with self._lock:
             self._flush(truncated=False)
 
+    def clear(self) -> None:
+        """Discard buffered data without emitting events. Used in the finally block
+        to drain any residual output (sent already with rid via flush) so the
+        buffer doesn't leak to the next request."""
+        with self._lock:
+            self._buf = []
+            self._bytes = 0
+
     def _flush(self, truncated: bool) -> None:
         if not self._buf:
             return
@@ -379,7 +387,7 @@ class _LakeBridge:
         if not isinstance(content, str):
             content = json.dumps(content, ensure_ascii=False, default=str)
         self._ensure()
-        now = time.time()
+        now = int(time.time() * 1000)
         entry = {
             "key": key,
             "content": content,
@@ -405,7 +413,7 @@ class _LakeBridge:
             re_obj = re.compile(re.escape(pattern), re.IGNORECASE)
         out = []
         for e in self._entries.values():
-            if re_obj.search(e.get("content", "")) or re_obj.search(e.get("key", "")):
+            if re_obj.search(e.get("content", "")) or re_obj.search(e.get("key", "")) or any(re_obj.search(t) for t in e.get("tags", [])):
                 out.append({"key": e["key"], "chars": len(e.get("content", "")), "tags": e.get("tags", [])})
                 if len(out) >= max_results:
                     break
@@ -553,8 +561,9 @@ def _handle_request(req: dict[str, Any]) -> None:
                    "evalue": f"unknown request type: {rtype!r}", "traceback": []})
     finally:
         _active["rid"] = None
-        sys.stdout.flush()  # type: ignore[attr-defined]
-        sys.stderr.flush()  # type: ignore[attr-defined]
+        # Drain residual output without emitting events (already sent with rid).
+        sys.stdout.clear()  # type: ignore[attr-defined]
+        sys.stderr.clear()  # type: ignore[attr-defined]
         _send({"event": "done", "id": rid})
 
 
