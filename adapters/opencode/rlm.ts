@@ -333,7 +333,10 @@ class ContextLake {
   }
 
   private async append(entry: LakeEntry) {
-    await Bun.write(this.file, JSON.stringify(entry) + "\n", { append: true })
+    // Bun.write's `{ append: true }` option is unreliable (Bun 1.4 only keeps the
+    // last write), so append via a documented file-system API instead.
+    const { appendFileSync } = await import("node:fs")
+    appendFileSync(this.file, JSON.stringify(entry) + "\n")
   }
 
   private async rewrite() {
