@@ -353,9 +353,19 @@ def _snippet(entry, needle, width=160):
 # el guard guarda el output completo en el context lake y entrega al modelo un
 # digest (head+tail + key). El modelo recupera el contenido con rlm_get/rlm_search.
 
-GUARD_THRESHOLD_CHARS = int(os.environ.get("RLM_GUARD_THRESHOLD_CHARS", "10000"))
-GUARD_HEAD_CHARS = int(os.environ.get("RLM_GUARD_HEAD_CHARS", "4000"))
-GUARD_TAIL_CHARS = int(os.environ.get("RLM_GUARD_TAIL_CHARS", "1000"))
+GUARD_THRESHOLD_CHARS = int(os.environ.get("RLM_GUARD_THRESHOLD_CHARS", "2000"))
+GUARD_HEAD_CHARS = int(os.environ.get("RLM_GUARD_HEAD_CHARS", "1200"))
+GUARD_TAIL_CHARS = int(os.environ.get("RLM_GUARD_TAIL_CHARS", "400"))
+# Invariant: the delivered digest (head+tail+marker) must be strictly SMALLER
+# than the threshold, or a payload just over the threshold would be stored and
+# returned at full size — paying the lake-write latency and shrinking nothing.
+# Asserted at import so a bad env override fails loudly instead of silently wasting.
+_GUARD_MARKER_RESERVE = 200  # generous upper bound on the marker's own length
+assert GUARD_HEAD_CHARS + GUARD_TAIL_CHARS + _GUARD_MARKER_RESERVE < GUARD_THRESHOLD_CHARS, (
+    f"RLM guard misconfigured: head({GUARD_HEAD_CHARS}) + tail({GUARD_TAIL_CHARS}) "
+    f"+ marker(~{_GUARD_MARKER_RESERVE}) >= threshold({GUARD_THRESHOLD_CHARS}); "
+    f"folding would not shrink anything"
+)
 # Legacy names, kept so out-of-tree callers/imports keep working.
 GUARD_HEAD_LINES = GUARD_HEAD_CHARS
 GUARD_TAIL_LINES = GUARD_TAIL_CHARS

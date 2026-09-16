@@ -136,6 +136,35 @@ def test_guard_only_fires_above_threshold():
     assert handler(tool_name="t", result=small, status="ok") is None
 
 
+def test_threshold_leaves_room_for_a_real_fold():
+    """head+tail+marker must be strictly below the threshold.
+
+    Otherwise a payload just over the threshold would be stored and returned at
+    its full size (plus the marker): the guard would pay the latency of a lake
+    write and shrink nothing. Enforced by an assert in the module, asserted here
+    too so the intent survives any refactor.
+    """
+    reserve = getattr(G, "_GUARD_MARKER_RESERVE", 200)
+    assert G.GUARD_HEAD_CHARS + G.GUARD_TAIL_CHARS + reserve < G.GUARD_THRESHOLD_CHARS, (
+        f"head({G.GUARD_HEAD_CHARS}) + tail({G.GUARD_TAIL_CHARS}) + marker(~{reserve}) "
+        f">= threshold({G.GUARD_THRESHOLD_CHARS})"
+    )
+
+
+def test_every_folded_payload_actually_shrinks():
+    """A payload just above the threshold must still be smaller after folding."""
+    # Include the worst case: barely over the threshold, with a long lake key
+    # (keys embed the tool name, so they are short, but be generous).
+    key = "auto/1789584472185/terminal"
+    for extra in (1, 50, 500, 2000):
+        raw = "w" * (G.GUARD_THRESHOLD_CHARS + extra)
+        out = _digest(raw, key=key)
+        assert len(out) < len(raw), (
+            f"threshold+{extra}: folding grew or matched the input "
+            f"({len(raw)} -> {len(out)})"
+        )
+
+
 def test_marker_present_and_single_line_body_has_no_newline_requirement():
     raw = "q" * 25_000
     out = _digest(raw, key="auto/xyz/big")
