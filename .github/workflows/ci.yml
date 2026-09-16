@@ -18,3 +18,5 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Run kernel test suite
         run: python3 tests/test_kernel.py
+      - name: Run guard test suite
+        run: python3 tests/test_guard.py
