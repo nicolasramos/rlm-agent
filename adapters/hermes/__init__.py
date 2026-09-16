@@ -354,26 +354,72 @@ def _snippet(entry, needle, width=160):
 # digest (head+tail + key). El modelo recupera el contenido con rlm_get/rlm_search.
 
 GUARD_THRESHOLD_CHARS = int(os.environ.get("RLM_GUARD_THRESHOLD_CHARS", "10000"))
-GUARD_HEAD_LINES = 40
-GUARD_TAIL_LINES = 10
+GUARD_HEAD_CHARS = int(os.environ.get("RLM_GUARD_HEAD_CHARS", "4000"))
+GUARD_TAIL_CHARS = int(os.environ.get("RLM_GUARD_TAIL_CHARS", "1000"))
+# Legacy names, kept so out-of-tree callers/imports keep working.
+GUARD_HEAD_LINES = GUARD_HEAD_CHARS
+GUARD_TAIL_LINES = GUARD_TAIL_CHARS
 GUARD_DISABLED = os.environ.get("RLM_GUARD", "1") == "0"
 _GUARD_MARKER = "[WATCH GUARD]"
 
 
+def _clip_head(s: str, n: int) -> str:
+    """First n chars, backing up to the previous newline so we never cut a line."""
+    if len(s) <= n:
+        return s
+    cut = s[:n]
+    nl = cut.rfind("\n")
+    if nl > n // 2:            # only snap back when it does not cost too much
+        cut = cut[:nl]
+    return cut
+
+
+def _clip_tail(s: str, n: int) -> str:
+    """Last n chars, advancing to the next newline so we never cut a line."""
+    if len(s) <= n:
+        return s
+    cut = s[-n:]
+    nl = cut.find("\n")
+    if nl >= 0 and nl < n // 2:
+        cut = cut[nl + 1:]
+    return cut
+
+
 def _guard_digest(key: str, content: str) -> str:
-    lines = content.splitlines()
-    head = lines[:GUARD_HEAD_LINES]
-    tail = lines[-GUARD_TAIL_LINES:] if len(lines) > GUARD_HEAD_LINES + GUARD_TAIL_LINES else []
-    parts = ["\n".join(head)]
-    if tail:
-        omitted = len(lines) - GUARD_HEAD_LINES - GUARD_TAIL_LINES
-        parts.append(f"\n… [{omitted} líneas omitidas] …\n")
-        parts.append("\n".join(tail))
-    parts.append(
+    """Fold oversized tool output by CHARACTERS, not lines.
+
+    Folding by lines (`lines[:40] + lines[-10:]`) silently no-ops whenever the
+    output has <= 50 lines — which is the common case for exactly the payloads
+    that trip the threshold: minified JSON and API responses are ONE line, so
+    head and tail together returned the whole document (plus the marker line),
+    i.e. the digest was *larger* than the raw output and 100% of it still
+    entered the prompt. Char-based folding clips any shape of input.
+    """
+    marker = (
         f"\n\n{_GUARD_MARKER} Output completo ({len(content):,} chars) guardado en el context lake. "
         f"Recupera con rlm_get('{key}') o busca con rlm_search/rlm_find."
     )
-    return "".join(parts)
+    if len(content) <= GUARD_HEAD_CHARS + GUARD_TAIL_CHARS:
+        # Too short to fold (the caller's threshold normally prevents this).
+        # Return it verbatim: a digest must never grow the prompt.
+        return content
+
+    head = _clip_head(content, GUARD_HEAD_CHARS)
+    tail = _clip_tail(content, GUARD_TAIL_CHARS)
+    if len(head) + len(tail) >= len(content):
+        # Clipping did not actually shorten anything (pathological input):
+        # fall back to a hard slice so the digest can never exceed the input.
+        head = content[:GUARD_HEAD_CHARS]
+        tail = content[-GUARD_TAIL_CHARS:]
+    omitted = len(content) - len(head) - len(tail)
+    body = head + f"\n… [{omitted:,} chars omitted] …\n" + tail
+
+    if len(body) + len(marker) < len(content):
+        return body + marker
+    if len(body) < len(content):
+        # The pointer would push us over the input size — keep the fold only.
+        return body
+    return content
 
 
 def _on_transform_tool_result(tool_name: str = "", args=None, result=None, status: str = "", **_) -> Optional[str]:
