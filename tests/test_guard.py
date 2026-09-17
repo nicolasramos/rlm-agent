@@ -185,6 +185,49 @@ def test_no_line_is_cut_in_half_for_multiline_input():
             assert ln in lines, f"head clipped mid-line: {ln[:60]!r}"
 
 
+def test_rlm_get_results_are_never_re_folded():
+    """rlm_get is the retrieval escape hatch and must be exempt from folding.
+
+    If a retrieved entry were folded again, the model could never read more
+    than head+tail of ANY lake entry: each rlm_get would return a digest
+    pointing at a new key whose retrieval is folded too — an unbounded loop.
+    """
+    handler = getattr(G, "_on_transform_tool_result", None)
+    if handler is None:
+        return  # standalone fallback: handler not loaded
+    big = "v" * (G.GUARD_THRESHOLD_CHARS + 500)
+    assert handler(tool_name="rlm_get", result=big, status="ok") is None, (
+        "rlm_get output must not be folded (retrieval must return the entry)"
+    )
+
+
+def test_other_large_tool_results_are_folded():
+    """The exemption is rlm_get-specific: other oversized results still fold."""
+    handler = getattr(G, "_on_transform_tool_result", None)
+    if handler is None:
+        return  # standalone fallback: handler not loaded
+    # Replace the lake with an in-memory double so the test never writes to
+    # the user's real lake directory.
+    lake_for = getattr(G, "_lake_for", None)
+    if lake_for is None:
+        return  # standalone fallback: store path not loadable
+    stored = {}
+
+    class _FakeLake:
+        def store(self, key, content, tags=None, source="model"):
+            stored[key] = content
+            return {"key": key, "content": content}
+
+    G._lake_for = lambda cwd: _FakeLake()
+    try:
+        big = "v" * (G.GUARD_THRESHOLD_CHARS + 500)
+        out = handler(tool_name="terminal", result=big, status="ok")
+    finally:
+        G._lake_for = lake_for
+    assert out is not None and len(out) < len(big), "oversized output must fold"
+    assert stored, "the guard must store the full payload in the lake"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

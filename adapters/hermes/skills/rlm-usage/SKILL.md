@@ -35,12 +35,10 @@ Usa RLM cuando **dos o más** de estas condiciones se cumplen:
 
 ## Gotchas verificados
 
-- `ipython` no captura `print()` — devolver el valor como expresión final (`rlm_test_var + 1` → `43`).
-- `%%bash` ejecuta (exit code) pero no captura stdout.
+- **Watch guard automático**: cualquier resultado de tool >2.000 chars que no sea de `rlm_get` se pliega solo al lake y recibe un digest (head+tail + key). Para leer el contenido completo, `rlm_get` (exento del guard — puedes leer la entrada entera hasta 50KB).
+- `ipython` captura `print()` y también el valor de la última expresión (`x + 1` → `43`).
+- `%%bash` captura stdout/stderr y devuelve el exit code; `%cd` persiste el cwd del kernel.
 - `rlm_result` devuelve `{status, summary, error}` cuando el child termina (SUCCEEDED/FAILED); mientras corre, `{status}`.
-- Los subagentes RLM usan `ctx.subagent_lifecycle` (fix PR #1) — estados reales, no fantasmas.
-- El kernel es por sesión: `%cd` persiste, variables persisten entre llamadas de la MISMA sesión.
-
-## Refuerzo
-
-El plugin ya inyecta la sección "RLM Programming Model" en el system prompt — esta skill es la regla de decisión que la activa. Si una tarea cumple la condición, usa RLM sin preguntar.
+- Los subagentes RLM usan `ctx.subagent_lifecycle` (estados reales, no fantasmas).
+- El kernel es por sesión: variables e imports persisten entre llamadas de la MISMA sesión.
+- Snapshot/restore: `rlm_snapshot` antes de compactación/sesión larga; `rlm_restore` tras compactación o reinicio. El estado vive bajo `<HERMES_HOME>/rlm-state/`.
