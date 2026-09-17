@@ -47,7 +47,6 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextvars
-import fcntl
 import inspect
 import json
 import os
@@ -63,6 +62,11 @@ import traceback
 import types
 import uuid
 from typing import Any
+
+try:  # POSIX advisory file locking for concurrent lake writers.
+    import fcntl
+except ImportError:  # Windows: flock semantics are unavailable; the lake
+    fcntl = None     # rewrite below degrades to read-then-write (no lock).
 
 PROTOCOL_VERSION = 1
 
@@ -448,7 +452,8 @@ class _LakeBridge:
             lock_path = self._file + ".lock"
             lock_fd = open(lock_path, "w")
             try:
-                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+                if fcntl is not None:
+                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
                 # Read back the lake file under lock to get concurrent writes,
                 # then rewrite with our entries removed.
                 fresh = {}
@@ -472,7 +477,8 @@ class _LakeBridge:
                     for e in fresh.values():
                         f.write(json.dumps(e, ensure_ascii=False) + "\n")
             finally:
-                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
                 lock_fd.close()
         return len(removed)
 
