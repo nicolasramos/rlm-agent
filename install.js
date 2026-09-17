@@ -24,6 +24,29 @@ import readline from "node:readline/promises";
 const here = dirname(fileURLToPath(import.meta.url));
 const HOME = homedir();
 
+// The Hermes home is NOT always ~/.hermes: the desktop app and profiled
+// sessions use HERMES_HOME (on Windows: %LOCALAPPDATA%\hermes). Writing to
+// ~/.hermes installs into a directory the runtime never reads — the update
+// "succeeds" and nothing live changes. Resolution order: HERMES_HOME env >
+// platform default > ~/.hermes (first candidate that actually has a
+// config.yaml wins; otherwise the first that exists; otherwise ~/.hermes).
+function hermesBaseCandidates() {
+  const cands = [];
+  if (process.env.HERMES_HOME) cands.push(resolve(process.env.HERMES_HOME));
+  if (process.platform === "win32" && process.env.LOCALAPPDATA) {
+    cands.push(join(process.env.LOCALAPPDATA, "hermes"));
+  }
+  cands.push(join(HOME, ".hermes"));
+  return cands;
+}
+
+function defaultHermesBase() {
+  const cands = hermesBaseCandidates();
+  for (const c of cands) if (existsSync(join(c, "config.yaml"))) return c;
+  for (const c of cands) if (existsSync(c)) return c;
+  return cands[cands.length - 1];
+}
+
 // ─── Prompt helper (TTY + pipe-safe) ─────────────────────────────────────────
 // readline/promises only serves ONE question from a piped stdin. For pipes we
 // buffer all lines up front and serve them sequentially; for a TTY we use the
@@ -83,8 +106,8 @@ const EDITORS = {
   },
   hermes: {
     label: "Hermes Agent",
-    detect: () => existsSync(join(HOME, ".hermes", "config.yaml")) || existsSync(join(HOME, ".hermes")),
-    defaultDir: () => join(HOME, ".hermes"),
+    detect: () => hermesBaseCandidates().some((c) => existsSync(c)),
+    defaultDir: () => defaultHermesBase(),
     files: (base) => [
       { src: join(here, "adapters", "hermes", "__init__.py"), dest: join(base, "plugins", "rlm", "__init__.py") },
       { src: join(here, "adapters", "hermes", "plugin.yaml"), dest: join(base, "plugins", "rlm", "plugin.yaml") },
@@ -176,15 +199,23 @@ function enableHermesPlugin(base) {
       lines[enabledIdx] = `${m[1]}enabled: [${items.join(", ")}]`;
     }
   } else {
-    // Block style: enabled:\n  - a\n  - b. Add `  - rlm` after the last item.
+    // Block style: enabled:\n  - a\n  - b. Add `  - rlm` after the last item —
+    // unless it is already listed (a duplicate entry is valid YAML but sloppy).
     let insertAt = enabledIdx;
+    let alreadyListed = false;
     for (let i = enabledIdx + 1; i < lines.length; i++) {
       const lm = lines[i].match(/^(\s*)- (.+)$/);
-      if (lm && lm[1].length > enabledIndent.length) { insertAt = i; continue; }
+      if (lm && lm[1].length > enabledIndent.length) {
+        if (lm[2].trim() === "rlm") alreadyListed = true;
+        insertAt = i;
+        continue;
+      }
       break;
     }
-    const itemIndent = enabledIndent + "  ";
-    lines.splice(insertAt + 1, 0, `${itemIndent}- rlm`);
+    if (!alreadyListed) {
+      const itemIndent = enabledIndent + "  ";
+      lines.splice(insertAt + 1, 0, `${itemIndent}- rlm`);
+    }
   }
   writeFileSync(configPath, lines.join("\n"));
   console.log("  ✓ enabled in config.yaml (plugins.enabled includes rlm)");

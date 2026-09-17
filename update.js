@@ -34,11 +34,22 @@ function semverCmp(a, b) {
   return 0;
 }
 
+function hermesHome() {
+  // Same resolution as install.js: HERMES_HOME wins, then the Windows
+  // %LOCALAPPDATA%\hermes default, then the legacy ~/.hermes.
+  if (process.env.HERMES_HOME) return resolve(process.env.HERMES_HOME);
+  if (process.platform === "win32" && process.env.LOCALAPPDATA) {
+    const p = join(process.env.LOCALAPPDATA, "hermes");
+    if (existsSync(p)) return p;
+  }
+  return join(homedir(), ".hermes");
+}
+
 function detectEditors(base) {
   const present = [];
   if (existsSync(join(base, ".config", "opencode"))) present.push("opencode");
   if (existsSync(join(base, ".pi", "agent", "extensions")) || existsSync(join(base, ".pi"))) present.push("pi");
-  if (existsSync(join(base, ".hermes", "config.yaml")) || existsSync(join(base, ".hermes"))) present.push("hermes");
+  if (existsSync(hermesHome())) present.push("hermes");
   return present;
 }
 
@@ -78,7 +89,12 @@ if (present.length === 0) {
   process.exit(0);
 }
 for (const key of present) {
-  const r = spawnSync("rlm-agent-install", ["--editor", key, "--dir", base], { stdio: "inherit" });
+  // --dir is only forwarded when the user actually passed one; otherwise each
+  // editor resolves its own default (homing every editor at $HOME would
+  // install opencode to ~/plugins/rlm.ts and miss the real HERMES_HOME).
+  const installArgs = ["--editor", key];
+  if (dirIdx >= 0) installArgs.push("--dir", base);
+  const r = spawnSync("rlm-agent-install", installArgs, { stdio: "inherit" });
   if (r.status !== 0) console.warn(`⚠ re-install for ${key} failed.`);
 }
 console.log("rlm-agent updated. Restart your editor(s) to activate.");
