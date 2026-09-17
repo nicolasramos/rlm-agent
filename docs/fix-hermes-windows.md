@@ -11,7 +11,7 @@ RLM was "installed" on a Windows host (plugin loaded, 12 tools visible) yet neve
 1. `ipython` returned only the last-expression repr — every `print()` disappeared.
 2. `rlm` (subagent tool) failed with `'str' object has no attribute 'get'`.
 3. `rlm-agent-update` reported success while nothing live changed.
-4. The published npm kernel **cannot start on Windows at all** (only the pre-`fcntl` local copies ran).
+4. Published npm builds (`0.1.0`/`0.1.1`, 2026-09-07) start on Windows but silently drop all `print()` output — they predate the `_current_cell` fix and never emit a `stdout` event with a request id. The `fcntl` startup crash is a `main`-only regression, introduced afterwards by the locked lake rewrite.
 
 ## Root causes
 
@@ -31,7 +31,7 @@ A secondary defect: `update.js` passed `--dir <homedir>` for every editor, so a 
 
 ### 3. Kernel: ungated `import fcntl` breaks Windows at startup
 
-The locked lake rewrite introduced `import fcntl` at module top level. Windows has no `fcntl` → `ModuleNotFoundError` before the `ready` frame → the kernel never starts. The published npm build carries this bug; local copies that predate it ran because they lack the locked rewrite entirely.
+The locked lake rewrite (`7a9d67c`, 2026-09-14) introduced `import fcntl` at module top level. Windows has no `fcntl` → `ModuleNotFoundError` before the `ready` frame → the kernel never starts. This is a `main`-only regression: the published npm builds (`0.1.0`/`0.1.1`, 2026-09-07) predate the locked rewrite and therefore contain no `fcntl` at all. They do start on Windows — see §4 for the defect they actually carry.
 
 ### 4. Adapter: stdout attribution mismatch (published builds)
 
@@ -76,8 +76,10 @@ Lake files and snapshots were written under `~/.hermes/rlm-state/`, outside `HER
 - `hermes plugins doctor` + `validate` on the installed plugin: 12 tools, 2 hooks, no collisions.
 - Legacy-state merge: pre-existing `somit/repo-inventory` entry (473 chars) and snapshot recovered under the new root; nothing deleted.
 
+Independent re-verification of this branch (macOS, Python 3.9.6 + 3.13): `scripts/verify.sh` → 7/7 kernel + 12/12 guard + protocol ok; `import fcntl` blocked via a `sys.meta_path` shim (simulating win32) → `main`'s kernel never emits the `ready` frame and aborts with `ModuleNotFoundError`, the patched kernel emits `ready` and answers with `stdout` carrying the request id; `install.js` on a block-style `plugins.enabled` containing `rlm` → `main` appends a duplicate, the patched one does not; `delegate_task` invoked without `parent_agent` returns the string `{"error": "delegate_task requires a parent agent context."}`, and `resp.get(...)` on it raises `AttributeError: 'str' object has no attribute 'get'`.
+
 ## Deployment notes
 
-- **Publish required**: the npm package (0.1.1) still ships the broken kernel + old adapter. Bump and `npm publish` to deliver these fixes to `rlm-agent-install` users.
+- **Publish required**: the npm package (0.1.1, 2026-09-07) still ships the pre-`_current_cell` kernel plus the old adapter (hardcoded `~/.hermes`, `delegate_task` spawn, no-op context engine). Bump `version` and `npm publish` to deliver these fixes to `rlm-agent-install` users. Note that `adapters/hermes/plugin.yaml` on this branch is `0.1.2` while `package.json` is still `0.1.1` — the bump should reconcile the two (and carry the plugin/hook changes, which the 0.1.1 package also predates).
 - Users who installed before this fix should re-run `rlm-agent-install --editor hermes` (it now resolves the right home) or sync the two adapter files manually.
 - No context engine is registered by design; kernel durability rides on `on_session_end` + `rlm_snapshot`/`rlm_restore`, and context folding on the `transform_tool_result` guard.
