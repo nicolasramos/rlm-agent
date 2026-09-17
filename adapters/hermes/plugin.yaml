@@ -1,5 +1,5 @@
 name: rlm
-version: 0.1.0
+version: 0.1.2
 description: "RLM (Recursive Language Model) for Hermes: persistent Python kernel (ipython), context lake (rlm_store/get/search/find/stats/forget), kernel snapshot/restore, and background subagents (rlm). Keeps large data out of the LLM prompt."
 author: Nicolás Ramos
 kind: standalone
@@ -18,7 +18,7 @@ provides_tools:
   - rlm_list
 provides_hooks:
   - on_session_end
-  - context_engine (rlm)
+  - transform_tool_result
 license: MIT
 homepage: https://github.com/nicolasramos/rlm-agent
 tags: [rlm, kernel, context, subagents]

@@ -215,6 +215,32 @@ def test_store_failure_does_not_pollute_memory():
     print("PASS: test_store_failure_does_not_pollute_memory")
 
 
+def test_kernel_module_imports_on_this_platform():
+    """kernel.py must be importable on every supported OS.
+
+    Windows has no fcntl module: an unguarded ``import fcntl`` kills the kernel
+    at startup there. Import the module by path in a child process (blocking
+    fcntl when it exists) and require a clean import.
+    """
+    kernel_dir = os.path.join(os.path.dirname(__file__), "..", "kernel")
+    kernel_path = os.path.join(kernel_dir, "kernel.py")
+    # Simulate a platform without fcntl by poisoning sys.modules: `import fcntl`
+    # then raises ImportError, which the module must survive.
+    code = (
+        "import sys; sys.modules['fcntl'] = None;"
+        "import importlib.util;"
+        f"spec = importlib.util.spec_from_file_location('_k', r'{kernel_path}');"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m);"
+        "assert m.fcntl is None, 'fcntl must degrade to None when unavailable';"
+        "print('imported-without-fcntl')"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"kernel failed to import without fcntl:\n{proc.stderr}"
+    assert "imported-without-fcntl" in proc.stdout
+
+    print("PASS: test_kernel_module_imports_on_this_platform")
+
+
 if __name__ == "__main__":
     tests = [
         test_stdout_carries_request_id,
@@ -223,6 +249,7 @@ if __name__ == "__main__":
         test_error_events_have_id,
         test_multiple_prints_same_id,
         test_store_failure_does_not_pollute_memory,
+        test_kernel_module_imports_on_this_platform,
     ]
 
     passed = 0
