@@ -5,12 +5,14 @@ Ports the RLM plugin for OpenCode/PI to Hermes' native Python plugin API:
   - ipython: persistent Python kernel (reuses kernel/kernel.py as-is)
   - rlm_store/get/search/find/stats/forget: context lake (same JSONL format)
   - rlm_snapshot/rlm_restore: persist / reload the kernel namespace
-  - rlm: background subagent via delegate_task (Hermes-native)
-  - system prompt section + compaction hook via register_context_engine
+  - rlm: background subagent via ctx.subagent_lifecycle (plugin-safe API)
+  - system prompt section + watch guard (transform_tool_result) + session cleanup
 
-Install: copy this file to ~/.hermes/plugins/rlm/__init__.py and
-kernel/kernel.py to ~/.hermes/plugins/rlm/kernel.py (or set RLM_KERNEL).
-Then restart Hermes (or /reset in a session).
+Install: copy this file to <HERMES_HOME>/plugins/rlm/__init__.py and
+kernel/kernel.py to <HERMES_HOME>/plugins/rlm/kernel.py (or set RLM_KERNEL).
+The Hermes home is %LOCALAPPDATA%\\hermes on Windows and ~/.hermes elsewhere,
+or whatever HERMES_HOME points at (profiles, desktop app). Then restart
+Hermes (or /reset in a session).
 """
 
 from __future__ import annotations
@@ -55,17 +57,76 @@ def _kernel_path() -> Path:
 
 
 def _python_bin() -> str:
+    """Interpreter for the kernel subprocess.
+
+    Order: RLM_KERNEL_PYTHON override → a real ``python3``/``python`` with a
+    working ``--version`` → the interpreter running Hermes itself. On Windows
+    ``python3`` often resolves to the Microsoft Store alias stub, which fails
+    ``--version`` when Python is not installed; the probe filters that stub out
+    without hardcoding install paths, and ``sys.executable`` is the last-resort
+    guarantee that a valid interpreter is always returned.
+    """
     env = os.environ.get("RLM_KERNEL_PYTHON")
     if env:
         return env
-    for c in ("python3", "/opt/homebrew/bin/python3.11", "/usr/local/bin/python3", "/usr/bin/python3"):
+    candidates = ["python3"]
+    if os.name == "nt":
+        candidates = ["python", "python3"]
+    candidates += ["/opt/homebrew/bin/python3.11", "/usr/local/bin/python3", "/usr/bin/python3"]
+    for c in candidates:
         try:
-            r = subprocess.run([c, "--version"], capture_output=True)
-            if r.returncode == 0:
+            r = subprocess.run([c, "--version"], capture_output=True, text=True)
+            out = f"{r.stdout or ''}{r.stderr or ''}"
+            if r.returncode == 0 and out.strip().startswith("Python 3"):
                 return c
         except Exception:
             pass
-    return "python3"
+    # Last resort: the interpreter running Hermes itself is always valid.
+    return sys.executable or "python3"
+
+
+def _state_root() -> Path:
+    """RLM state root, under the Hermes home (profiles/desktop aware).
+
+    HERMES_HOME wins; otherwise the platform default from hermes_constants
+    (on Windows ``%LOCALAPPDATA%\\hermes``); otherwise the legacy ``~/.hermes``.
+    """
+    env = os.environ.get("HERMES_HOME", "").strip()
+    if env:
+        return Path(env) / "rlm-state"
+    try:
+        from hermes_constants import get_hermes_home  # type: ignore[import-not-found]
+        return Path(get_hermes_home()) / "rlm-state"
+    except Exception:
+        return Path.home() / ".hermes" / "rlm-state"
+
+
+def _migrate_legacy_state() -> None:
+    """One-shot, non-destructive sync of legacy ``~/.hermes/rlm-state`` into
+    the active root. Files already present in the target win; nothing is
+    deleted. Directory-level merge, so a partially created target (e.g. an
+    empty ``lake/``) never blocks the real legacy files from coming across."""
+    root = _state_root()
+    legacy = Path.home() / ".hermes" / "rlm-state"
+    if root == legacy or not legacy.exists():
+        return
+
+    def _merge_dir(src: Path, dst: Path) -> None:
+        dst.mkdir(parents=True, exist_ok=True)
+        for item in src.iterdir():
+            target = dst / item.name
+            if item.is_dir():
+                _merge_dir(item, target)
+            elif not target.exists():
+                try:
+                    shutil.copy2(item, target)
+                except Exception:
+                    pass
+
+    try:
+        _merge_dir(legacy, root)
+    except Exception:
+        pass  # best-effort; state is recreated on demand
 
 
 def _lake_file_for(project_dir: str) -> Path:
@@ -75,11 +136,11 @@ def _lake_file_for(project_dir: str) -> Path:
     # relative path resolves to the SAME lake file for the same real directory.
     normalized = os.path.realpath(os.path.abspath(project_dir.rstrip("/")))
     h = hashlib.sha256(normalized.encode()).hexdigest()[:16]
-    return Path.home() / ".hermes" / "rlm-state" / "lake" / f"{h}.jsonl"
+    return _state_root() / "lake" / f"{h}.jsonl"
 
 
 def _state_dir_for(session_id: str) -> Path:
-    return Path.home() / ".hermes" / "rlm-state" / session_id
+    return _state_root() / session_id
 
 
 # ─── Kernel client (JSON-lines over stdio, same protocol as kernel.py) ──────
@@ -406,8 +467,8 @@ def _guard_digest(key: str, content: str) -> str:
     entered the prompt. Char-based folding clips any shape of input.
     """
     marker = (
-        f"\n\n{_GUARD_MARKER} Output completo ({len(content):,} chars) guardado en el context lake. "
-        f"Recupera con rlm_get('{key}') o busca con rlm_search/rlm_find."
+        f"\n\n{_GUARD_MARKER} Full output ({len(content):,} chars) stored in the context lake. "
+        f"Retrieve it with rlm_get('{key}') or search with rlm_search/rlm_find."
     )
     if len(content) <= GUARD_HEAD_CHARS + GUARD_TAIL_CHARS:
         # Too short to fold (the caller's threshold normally prevents this).
@@ -439,6 +500,13 @@ def _on_transform_tool_result(tool_name: str = "", args=None, result=None, statu
     if status != "ok" or not isinstance(result, str):
         return None
     if len(result) <= GUARD_THRESHOLD_CHARS:
+        return None
+    if tool_name == "rlm_get":
+        # Retrieval is already an explicit fold-by-choice by the model: rlm_get
+        # is capped at LAKE_GET_MAX_CHARS by its own contract. Re-folding it
+        # would replace the requested content with a digest pointing at yet
+        # another key whose retrieval is ALSO folded — an infinite fold loop in
+        # which the model can never read more than head+tail of any entry.
         return None
     if _GUARD_MARKER in result[:200]:
         return None  # ya es un digest — no re-guardar
@@ -511,7 +579,10 @@ def _arr(desc):
 def register(ctx) -> None:
     """Register all RLM tools. Called once by the Hermes plugin loader."""
     toolset = "rlm"
-    lifecycle = ctx.subagent_lifecycle
+    # Plugin-safe subagent service. Absent on older Hermes builds: the rlm tool
+    # then reports a clear error instead of failing plugin registration.
+    lifecycle = getattr(ctx, "subagent_lifecycle", None)
+    _migrate_legacy_state()
 
     def _ipython(args, **kw):
         session_id = kw.get("session_id") or kw.get("task_id") or "default"
@@ -610,6 +681,8 @@ def register(ctx) -> None:
         session_id = kw.get("session_id") or kw.get("task_id") or "default"
         prompt = args.get("prompt", "")
         name = (args.get("name") or prompt[:60]).strip().strip("'\"")[:80]
+        if lifecycle is None:
+            return "rlm spawn failed: this Hermes build does not expose ctx.subagent_lifecycle; update Hermes or use delegate_task."
         try:
             from agent.subagent_lifecycle import SubagentLaunchRequest
             request = SubagentLaunchRequest(
@@ -710,6 +783,10 @@ def register(ctx) -> None:
     )
 
     # Compaction hook — snapshot the kernel and inject a variable summary.
+    # NOTE: not wired to any Hermes hook today. Kernel durability at session
+    # end is handled by _cleanup() (on_session_end) and the explicit
+    # rlm_snapshot/rlm_restore pair; kept as the digest builder for a future
+    # pre-compaction integration.
     def _on_compact(session_id):
         kernel = _kernels.get(session_id)
         if not kernel:
@@ -728,29 +805,18 @@ def register(ctx) -> None:
     ctx.register_hook("on_session_end", lambda **kw: _cleanup(kw.get("session_id") or "default"))
     ctx.register_hook("transform_tool_result", _on_transform_tool_result)
 
-    # Compaction context engine — snapshot the kernel and inject a variable summary.
-    # Registered via ctx.register_context_engine() so Hermes calls it during compression.
-    try:
-        from agent.context_engine import ContextEngine
+    # No context engine is registered on purpose.
+    #
+    # ctx.register_context_engine() REPLACES the built-in ContextCompressor, but
+    # only when the user sets ``context.engine`` to this plugin's name — the
+    # default ``context.engine: compressor`` never selects a plugin engine. A
+    # snapshot-only engine is therefore inert in the default setup and actively
+    # harmful if selected (should_compress() -> False would DISABLE automatic
+    # compaction for the user). Kernel durability is handled where it belongs:
+    # _cleanup() snapshots at session end, rlm_snapshot / rlm_restore cover
+    # explicit checkpoints, and transform_tool_result folds oversized tool
+    # output into the lake before it reaches the prompt.
 
-        class _RLMContextEngine(ContextEngine):
-            @property
-            def name(self) -> str:
-                return "rlm"
-
-            def update_from_response(self, usage: dict) -> None:
-                pass
-
-            def should_compress(self, prompt_tokens: int = None) -> bool:
-                return False  # Never auto-compress; we only snapshot on compaction
-
-            def compress(self, messages: list) -> list:
-                return messages
-
-        ctx.register_context_engine(_RLMContextEngine())
-    except Exception:
-        # agent.context_engine not available — best-effort, log silently.
-        pass
 
 
 def _cleanup(session_id):

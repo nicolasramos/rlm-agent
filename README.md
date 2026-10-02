@@ -27,6 +27,7 @@ Non-interactive (for scripts/CI):
 
 ```bash
 rlm-agent-install --editor opencode            # default location
+rlm-agent-install --editor hermes              # resolved Hermes home (HERMES_HOME-aware)
 rlm-agent-install --editor hermes --dir ~/.hermes
 ```
 
@@ -34,7 +35,7 @@ rlm-agent-install --editor hermes --dir ~/.hermes
 
 - **OpenCode** → `~/.config/opencode/plugins/rlm.ts` + `rlm-kernel/kernel.py` (the plugin injects the RLM usage rule into the system prompt)
 - **PI** → `~/.pi/agent/extensions/rlm.ts` + `rlm-kernel/kernel.py` + `AGENTS.md` (the usage rule, loaded as global context)
-- **Hermes** → `~/.hermes/plugins/rlm/` (plugin + kernel + manifest), auto-enabled in `config.yaml`, plus the **`rlm-usage` skill** → `~/.hermes/skills/agent-workflow/rlm-usage/` (the decision rule that tells the agent *when* to use RLM — without it the plugin only describes the tools)
+- **Hermes** → `<HERMES_HOME>/plugins/rlm/` (plugin + kernel + manifest), auto-enabled in `config.yaml`, plus the **`rlm-usage` skill** → `<HERMES_HOME>/skills/agent-workflow/rlm-usage/` (the decision rule that tells the agent *when* to use RLM — without it the plugin only describes the tools). `<HERMES_HOME>` is `%LOCALAPPDATA%\hermes` on Windows and `~/.hermes` elsewhere; profiles and the desktop app may point it anywhere, and the installer resolves it (HERMES_HOME env → platform default → `~/.hermes`), so it never installs into a home the runtime does not read.
 
 Restart the editor (or `/reset` in Hermes) to activate.
 
@@ -58,7 +59,7 @@ Checks the npm registry for a newer version, reinstalls the package, and re-copi
 | `rlm_get` / `rlm_search` / `rlm_find` | Retrieve from the lake: by key, by regex, by text — snippets only, on demand. | Context folding |
 | `rlm_stats` / `rlm_forget` | Lake statistics and cleanup. | Context folding |
 
-Plus hooks: automatic kernel snapshot + variable summary injected into the **compaction prompt** (Hermes via `register_context_engine`; OpenCode via the compaction hook), RLM usage instructions in the **system prompt**, and kernel cleanup on session end.
+Plus hooks: kernel cleanup + best-effort snapshot on session end (`on_session_end`), and the **watch guard** (`transform_tool_result`) that folds oversized tool output into the lake before it reaches the prompt — the model gets a head+tail digest plus the lake key. RLM usage instructions are injected into the **system prompt**. The Hermes adapter deliberately does **not** register a context engine: `register_context_engine()` replaces the built-in `ContextCompressor` and a snapshot-only engine would disable automatic compaction.
 
 ## Architecture
 
