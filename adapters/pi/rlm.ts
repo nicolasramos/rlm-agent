@@ -27,6 +27,98 @@ import readline from "node:readline"
 const DEFAULT_TIMEOUT = 120
 const LAKE_GET_MAX_CHARS = 50_000
 
+// ─── Watch guard (auto context folding) ─────────────────────────────────────
+// When a tool returns more than RLM_GUARD_THRESHOLD_CHARS, the guard saves
+// the full output to the context lake and delivers a folded digest (head+tail
+// + key) instead of the raw content. The model retrieves the full content via
+// rlm_get / rlm_search.
+
+const GUARD_THRESHOLD_CHARS = parseInt(process.env.RLM_GUARD_THRESHOLD_CHARS || "10000", 10)
+const GUARD_HEAD_CHARS = parseInt(process.env.RLM_GUARD_HEAD_CHARS || "4000", 10)
+const GUARD_TAIL_CHARS = parseInt(process.env.RLM_GUARD_TAIL_CHARS || "1000", 10)
+const GUARD_DISABLED = process.env.RLM_GUARD === "0"
+const GUARD_MARKER = "[WATCH GUARD]"
+
+function clipHead(s: string, n: number): string {
+  if (s.length <= n) return s
+  const cut = s.slice(0, n)
+  const nl = cut.lastIndexOf("\n")
+  if (nl > n * 0.1) {
+    return cut.slice(0, nl) + "\n..."
+  }
+  return cut
+}
+
+function clipTail(s: string, n: number): string {
+  if (s.length <= n) return s
+  const cut = s.slice(-n)
+  const nl = cut.indexOf("\n")
+  if (nl > n * 0.1) {
+    return "...\n" + cut.slice(nl + 1)
+  }
+  return cut
+}
+
+function guardDigest(key: string, content: string): string {
+  const head = clipHead(content, GUARD_HEAD_CHARS)
+  const tail = clipTail(content, GUARD_TAIL_CHARS)
+  const body = head + "\n\n...\n\n" + tail
+  const marker = `\n\n${GUARD_MARKER} Output completo (${content.length.toLocaleString()} chars) guardado en el context lake. Recupera con rlm_get('${key}') o busca con rlm_search/rlm_find.`
+  if (body.length + marker.length < content.length) {
+    return body + marker
+  }
+  return content
+}
+
+// onToolResult is called from inside the extension scope where lakeFor exists
+function makeToolResultHandler(lakeFor: (p: string) => ContextLake) {
+  return function onToolResult(event: any): any {
+    if (GUARD_DISABLED) return null
+    const result = event.result
+    if (!result || typeof result !== "object") return null
+
+    // Extract all text content, skip ImageContent
+    const contentArr = result.content
+    if (!Array.isArray(contentArr)) return null
+
+    let textParts: string[] = []
+    for (const part of contentArr) {
+      if (part.type === "text" && part.text) {
+        textParts.push(part.text)
+      }
+      // Skip ImageContent — don't fold images
+    }
+
+    const combinedText = textParts.join("\n")
+    if (combinedText.length <= GUARD_THRESHOLD_CHARS) return null
+
+    try {
+      const key = `auto/${Date.now()}/${event.tool_name || "tool"}`
+      const projectDir = event.ctx?.projectDir || process.cwd()
+      const lake = lakeFor(projectDir)
+      lake.store(key, combinedText, ["auto", "watch-guard", event.tool_name || "tool"], "watch_guard")
+
+      // Replace text content with folded digest
+      const newContent: any[] = []
+      let digestInserted = false
+      for (const part of contentArr) {
+        if (part.type === "text" && !digestInserted) {
+          newContent.push({ type: "text", text: guardDigest(key, combinedText) })
+          digestInserted = true
+        }
+        // Keep ImageContent as-is
+        if (part.type === "image") {
+          newContent.push(part)
+        }
+      }
+
+      return { ...result, content: newContent }
+    } catch {
+      return null
+    }
+  }
+}
+
 function kernelPath(): string {
   if (process.env.RLM_KERNEL) return process.env.RLM_KERNEL
   const candidates = [
@@ -544,5 +636,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_end", async () => {
     for (const k of kernels.values()) await k.shutdown().catch(() => {})
     kernels.clear()
+  })
+
+  // Watch guard: fold oversized tool results into the lake
+  const toolResultHandler = makeToolResultHandler(lakeFor)
+  pi.on("tool_result", (event: any) => {
+    const folded = toolResultHandler(event)
+    if (folded) return folded
   })
 }
