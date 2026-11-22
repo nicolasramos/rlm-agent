@@ -40,6 +40,14 @@ Protocol (one JSON object per line):
 Output caps keep the model context lean: stdout is capped per cell and the
 trailing-expression repr is truncated. The model can query specific values
 with later cells instead of receiving everything.
+
+Transport modes:
+  stdio (default)   the original newline-delimited JSON protocol on stdin/stdout
+  socket            ``kernel.py --socket <path> [--owner <pid>]``: the same
+                    protocol over a Unix socket. The kernel runs detached from
+                    any editor process so clients (the MCP server) can
+                    reconnect after a crash or editor recycle; it exits when
+                    the owner process dies.
 """
 
 from __future__ import annotations
@@ -55,6 +63,7 @@ import pickle
 import queue
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -574,6 +583,110 @@ def _safe_str(exc: BaseException) -> str:
         return "<exception str() failed>"
 
 
+def _pid_alive(pid: int) -> bool:
+    """True if a process with this pid exists (EPERM counts as alive)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def main_socket(socket_path: str, owner_pid: int | None = None) -> int:
+    """Socket transport mode: the same JSON-lines protocol over a Unix socket.
+
+    The kernel runs DETACHED from any editor process. A client (the MCP
+    server) connects, speaks the protocol, and may reconnect after a crash
+    or editor recycle — variables survive. The kernel exits when the owner
+    process dies (so it never outlives the editor session that spawned it)
+    or on a shutdown request.
+
+    Usage: kernel.py --socket /path/to/socket [--owner <pid>]
+    """
+    global _protocol_fd, _ns
+    _protocol_fd = -1  # set per request to the active connection's fd
+
+    os.makedirs(os.path.dirname(os.path.abspath(socket_path)), exist_ok=True)
+    if os.path.exists(socket_path):
+        os.unlink(socket_path)  # stale socket from a dead daemon
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(socket_path)
+    listener.listen(4)
+    listener.settimeout(1.0)
+
+    # Same output capture as stdio mode: cells print into protocol events.
+    sys.stdout = _StreamWriter("stdout")  # type: ignore[assignment]
+    sys.stderr = _StreamWriter("stderr")  # type: ignore[assignment]
+
+    signal.signal(signal.SIGINT, _sigint_handler)
+
+    _ns = {
+        "__name__": "__main__",
+        "__builtins__": __builtins__,
+        "emit": emit,
+        "rlm_lake": rlm_lake,
+    }
+
+    # Cells run on the main thread so SIGINT interrupts the executing cell.
+    # Reader threads only enqueue (request, connection_fd) pairs.
+    requests: "queue.Queue[tuple[dict[str, Any], int]]" = queue.Queue()
+
+    def owner_watchdog() -> None:
+        if owner_pid is None:
+            return
+        while True:
+            time.sleep(2)
+            if not _pid_alive(owner_pid):
+                os._exit(0)  # the editor session is gone; do not outlive it
+
+    threading.Thread(target=owner_watchdog, daemon=True).start()
+
+    def reader(conn: socket.socket) -> None:
+        try:
+            fd = conn.fileno()
+            for raw in conn.makefile("rb"):
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    req = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if req.get("type") == "interrupt":
+                    _deliver_sigint()
+                else:
+                    requests.put((req, fd))
+        except (OSError, ValueError):
+            pass  # connection closed: the daemon keeps serving new clients
+
+    def acceptor() -> None:
+        """Accept loop on its own thread: the main thread is busy processing
+        requests (cells must run there for SIGINT), so accept/ready/reader
+        setup happens here. Reconnects after a client death work because of
+        this separation."""
+        while True:
+            try:
+                conn, _addr = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            try:
+                conn.sendall((json.dumps({"event": "ready", "version": PROTOCOL_VERSION},
+                                         separators=(",", ":")) + "\n").encode())
+            except OSError:
+                pass
+            threading.Thread(target=reader, args=(conn,), daemon=True).start()
+
+    threading.Thread(target=acceptor, daemon=True).start()
+    while True:
+        req, fd = requests.get()
+        _protocol_fd = fd  # events for this request go to its connection
+        _handle_request(req)
+
+
 def main() -> int:
     global _protocol_fd, _ns
     _protocol_fd = sys.stdout.fileno()
@@ -618,4 +731,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    _args = sys.argv[1:]
+    if _args and _args[0] == "--socket":
+        if len(_args) < 2:
+            print("usage: kernel.py --socket <path> [--owner <pid>]", file=sys.stderr)
+            sys.exit(2)
+        _owner = None
+        if "--owner" in _args:
+            _owner = int(_args[_args.index("--owner") + 1])
+        sys.exit(main_socket(_args[1], _owner))
     sys.exit(main())
