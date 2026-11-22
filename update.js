@@ -9,13 +9,14 @@
  *
  * The update uses the DEFAULT install locations for each editor. If you
  * installed with a custom --dir, re-run rlm-agent-install manually after
- * updating.
+ * updating. Detection lives in editors.js (shared with install.js).
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { detectPresent, EDITORS } from "./editors.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(here, "package.json"), "utf-8"));
@@ -32,14 +33,6 @@ function semverCmp(a, b) {
     if (x < y) return -1;
   }
   return 0;
-}
-
-function detectEditors(base) {
-  const present = [];
-  if (existsSync(join(base, ".config", "opencode"))) present.push("opencode");
-  if (existsSync(join(base, ".pi", "agent", "extensions")) || existsSync(join(base, ".pi"))) present.push("pi");
-  if (existsSync(join(base, ".hermes", "config.yaml")) || existsSync(join(base, ".hermes"))) present.push("hermes");
-  return present;
 }
 
 const args = process.argv.slice(2);
@@ -72,13 +65,17 @@ if (inst.status !== 0) {
 }
 
 // 2. Re-copy adapter files to every detected editor (default locations).
-const present = detectEditors(base);
+// `base` is a home-like root: each editor's install dir is its defaultDir
+// under that root (passing `base` itself as --dir would install to the
+// wrong place — regression fixed in 0.2.0).
+const present = detectPresent(base);
 if (present.length === 0) {
   console.log("No supported editor detected — package updated, files not copied.");
   process.exit(0);
 }
 for (const key of present) {
-  const r = spawnSync("rlm-agent-install", ["--editor", key, "--dir", base], { stdio: "inherit" });
+  const editorBase = EDITORS[key].defaultDir(base);
+  const r = spawnSync("rlm-agent-install", ["--editor", key, "--dir", editorBase], { stdio: "inherit" });
   if (r.status !== 0) console.warn(`⚠ re-install for ${key} failed.`);
 }
 console.log("rlm-agent updated. Restart your editor(s) to activate.");
