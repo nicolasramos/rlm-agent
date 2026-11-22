@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 __PLUGIN_DIR__/hooks/rlm_hook.py snapshot" }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          { "type": "command", "command": "python3 __PLUGIN_DIR__/hooks/rlm_hook.py restore-hint" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 __PLUGIN_DIR__/hooks/rlm_guard_hook.py" }
+        ]
+      }
+    ]
+  }
+}

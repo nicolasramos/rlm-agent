@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "rlm": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["__PLUGIN_DIR__/rlm_mcp_server.py", "--surface", "core"],
+      "timeout": 300000,
+      "env": {}
+    }
+  }
+}
