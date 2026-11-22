@@ -1,0 +1,8 @@
+{
+  "name": "rlm-agent",
+  "version": "0.2.0",
+  "description": "RLM (Recursive Language Model): a persistent Python kernel, a context lake and an oversized-output guard that keep large data out of the Claude Code prompt.",
+  "author": {
+    "name": "Nicolas Ramos"
+  }
+}
