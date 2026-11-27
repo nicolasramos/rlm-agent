@@ -39,6 +39,9 @@ function detectEditors(base) {
   if (existsSync(join(base, ".config", "opencode"))) present.push("opencode");
   if (existsSync(join(base, ".pi", "agent", "extensions")) || existsSync(join(base, ".pi"))) present.push("pi");
   if (existsSync(join(base, ".hermes", "config.yaml")) || existsSync(join(base, ".hermes"))) present.push("hermes");
+  if (existsSync(join(base, ".claude")) || existsSync(join(base, ".claude.json"))) present.push("claude");
+  if (existsSync(join(base, ".codex"))) present.push("codex");
+  if (existsSync(join(base, ".copilot"))) present.push("copilot");
   return present;
 }
 

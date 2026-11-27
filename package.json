@@ -1,7 +1,7 @@
 {
   "name": "rlm-agent",
-  "version": "0.1.1",
-  "description": "RLM (Recursive Language Model) for any editor: persistent Python kernel, context lake, and background subagents that keep large data out of the LLM prompt. One repo, one installer, per-editor adapters.",
+  "version": "0.2.0",
+  "description": "RLM (Recursive Language Model) for any editor: persistent Python kernel, context lake, and background subagents that keep large data out of the LLM prompt. One repo, one installer, per-editor adapters (OpenCode, PI, Hermes) plus one MCP server for Claude Code, Codex and Copilot.",
   "type": "module",
   "main": "install.js",
   "files": [
@@ -13,10 +13,13 @@
   ],
   "bin": {
     "rlm-agent-install": "install.js",
-    "rlm-agent-update": "update.js"
+    "rlm-agent-update": "update.js",
+    "rlm-agent-mcp": "adapters/mcp/server.py"
   },
   "scripts": {
-    "test": "python3 tests/test_kernel.py",
+    "test": "python3 tests/test_kernel.py && python3 tests/test_mcp_server.py",
+    "test:kernel": "python3 tests/test_kernel.py",
+    "test:mcp": "python3 tests/test_mcp_server.py",
     "update": "node update.js"
   },
   "keywords": [
@@ -27,6 +30,13 @@
     "pi-mono",
     "hermes",
     "hermes-agent",
+    "claude",
+    "claude-code",
+    "codex",
+    "copilot",
+    "github-copilot",
+    "mcp",
+    "model-context-protocol",
     "python",
     "kernel",
     "subagents",

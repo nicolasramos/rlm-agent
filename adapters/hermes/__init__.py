@@ -277,6 +277,8 @@ class ContextLake:
 
         lines = [json.dumps(e) for e in all_entries.values()]
         self.file.write_text("\n".join(lines) + ("\n" if lines else ""))
+        # Force the next read to pick up the file we just wrote.
+        self.last_mtime = 0
 
     def store(self, key, content, tags=None, source="model"):
         self._ensure_loaded()
