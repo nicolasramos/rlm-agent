@@ -15,7 +15,7 @@ One repo, one installer, per-editor adapters. RLM is the paradigm from [arXiv:25
 | **Codex** | `adapters/mcp/server.py` | MCP stdio server (`[mcp_servers.rlm]`) |
 | **Copilot** (VS Code + Copilot CLI) | `adapters/mcp/server.py` | MCP stdio server (`mcpServers.rlm`) |
 
-All of them share the same `kernel/kernel.py`, the same context lake and the same state directory, so work started in one editor can be finished in another.
+All of them share the same `kernel/kernel.py`, the same context lake and the same state directory, so work started in one editor can be finished in another. Any other client that only has a shell gets RLM through the **`rlm` CLI** (see below).
 
 ## Install
 
@@ -75,6 +75,27 @@ Plus hooks: automatic kernel snapshot + variable summary injected into the **com
 ### Subagents in MCP clients
 
 Claude Code, Codex and Copilot reach RLM through one MCP server, and an MCP server **cannot spawn editor-native subagents**. Those three therefore get the kernel, the lake and snapshot/restore, but not `rlm` / `rlm_list` / `rlm_result`. For recursive work, use the editor's own subagent feature and hand it lake keys ("the data is in key `logs/2026-11-27`, read it with `rlm_get`").
+
+## Any other agent: the `rlm` CLI
+
+`npm i -g rlm-agent` also puts `rlm` on the PATH. It drives the **same kernel and the same lake** from a shell, so an editor without MCP, a cron job or an agent that only runs commands gets RLM too:
+
+```bash
+rlm exec -c "import pandas as pd; df = pd.read_csv('big.csv'); len(df)"
+echo "print(41 + 1)" | rlm exec
+rlm sh "grep -c ERROR app.log"          # the same as a %%bash cell
+rlm store logs/build --file build.log --tags build,ci
+rlm search "ERROR|FATAL"
+rlm get logs/build | head -50
+rlm inspect
+rlm mcp                                  # run the MCP server from the same entry point
+```
+
+The persistent namespace needs a process that outlives one command, so `exec` talks to a small broker daemon per project over a Unix socket in `~/.rlm/run/`. It starts on first use, exits after `RLM_IDLE_TIMEOUT` seconds (default 3600) without traffic, and `rlm stop` closes it immediately. Lake commands (`store`, `get`, `search`, `find`, `stats`, `forget`) never need the daemon.
+
+Exit codes: `0` ok, `1` the cell raised (the error text is printed), `2` usage or transport error.
+
+The installer also copies `rlm.py` next to the MCP server of every MCP-based editor, so `python3 ~/.claude/rlm/rlm.py exec -c "..."` works even without a global install.
 
 ## State and the context lake
 

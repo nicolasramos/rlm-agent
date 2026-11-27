@@ -14,12 +14,14 @@
   "bin": {
     "rlm-agent-install": "install.js",
     "rlm-agent-update": "update.js",
+    "rlm": "adapters/cli/rlm.py",
     "rlm-agent-mcp": "adapters/mcp/server.py"
   },
   "scripts": {
-    "test": "python3 tests/test_kernel.py && python3 tests/test_mcp_server.py",
+    "test": "python3 tests/test_kernel.py && python3 tests/test_mcp_server.py && python3 tests/test_cli.py",
     "test:kernel": "python3 tests/test_kernel.py",
     "test:mcp": "python3 tests/test_mcp_server.py",
+    "test:cli": "python3 tests/test_cli.py",
     "update": "node update.js"
   },
   "keywords": [
@@ -37,6 +39,7 @@
     "github-copilot",
     "mcp",
     "model-context-protocol",
+    "cli",
     "python",
     "kernel",
     "subagents",

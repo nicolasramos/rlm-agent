@@ -48,3 +48,11 @@ Use RLM when **two or more** of these hold:
 An MCP server cannot spawn editor-native subagents. For recursive work use the editor's own
 subagent/task feature and point it at the lake keys it needs, for example:
 "Run this analysis; the data is in context-lake key `logs/2026-11-27`, read it with `rlm_get`."
+
+## Shell fallback (any client)
+
+When MCP is not available (or the client cannot load servers), the same kernel and the same lake are
+reachable from a shell: `rlm exec -c "..."`, `rlm sh "..."`, `rlm store` / `get` / `search` / `find` /
+`stats` / `forget`, `rlm inspect`. If `rlm` is not on the PATH, the installer leaves the same command
+next to the MCP server (`python3 <install-dir>/rlm/rlm.py`). State is shared with MCP, so a variable
+created through one path is visible from the other.

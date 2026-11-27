@@ -120,6 +120,7 @@ const instructions = () => readFileSync(join(here, "adapters", "mcp", "instructi
 function mcpFiles(base) {
   return [
     { src: join(here, "adapters", "mcp", "server.py"), dest: join(base, "rlm", "server.py") },
+    { src: join(here, "adapters", "cli", "rlm.py"), dest: join(base, "rlm", "rlm.py") },
     { src: join(here, "kernel", "rlm_client.py"), dest: join(base, "rlm", "rlm_client.py") },
     { src: join(here, "kernel", "kernel.py"), dest: join(base, "rlm", "kernel.py") },
   ];
