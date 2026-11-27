@@ -92,15 +92,23 @@ class Broker:
         self.cells = 0
 
     def serve(self) -> int:
+        # Never become a second broker for the same project: a short probe tells
+        # a live server from a stale socket file.
+        if _probe(self.project, 0.2):
+            print("another rlm broker is already serving this project", file=sys.stderr)
+            return 0
         if os.path.exists(self.path):
-            os.unlink(self.path)
+            try:
+                os.unlink(self.path)
+            except OSError:
+                pass
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.bind(self.path)
         try:
             os.chmod(self.path, 0o600)
         except OSError:
             pass
-        srv.listen(8)
+        srv.listen(16)
         srv.settimeout(1.0)
         try:
             while True:
@@ -119,10 +127,7 @@ class Broker:
                 srv.close()
             except OSError:
                 pass
-            try:
-                os.unlink(self.path)
-            except OSError:
-                pass
+            _unlink_if_ours(self.path, srv)
             self.kernel.shutdown()
         return 0
 
@@ -242,6 +247,29 @@ def _connect(project: str, timeout: float = START_TIMEOUT) -> socket.socket:
     return s
 
 
+def _probe(project: str, wait: float) -> bool:
+    """True when a broker answers within `wait` seconds (stale files do not)."""
+    deadline = time.time() + wait
+    while True:
+        try:
+            s = _connect(project, timeout=0.5)
+            s.close()
+            return True
+        except OSError:
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.05)
+
+
+def _unlink_if_ours(path: str, srv: socket.socket) -> None:
+    """Remove the socket only when it is still the one this process bound."""
+    try:
+        if os.stat(path).st_ino == os.fstat(srv.fileno()).st_ino:
+            os.unlink(path)
+    except OSError:
+        pass
+
+
 def _request(project: str, payload: dict, autostart: bool = True,
              read_timeout: float = 180.0) -> dict:
     try:
@@ -267,30 +295,34 @@ def _request(project: str, payload: dict, autostart: bool = True,
 
 
 def _start_broker(project: str) -> None:
-    log = open(log_path(project), "ab")
-    subprocess.Popen(
-        [sys.executable, str(Path(__file__).resolve()), "serve", "--project", project],
-        cwd=project,
-        stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-        start_new_session=True,
-        env=dict(os.environ),
-    )
-    path = socket_path(project)
-    deadline = time.time() + START_TIMEOUT
-    while time.time() < deadline:
-        if path.exists():
-            try:
-                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                probe.settimeout(0.5)
-                probe.connect(str(path))
-                probe.close()
-                return
-            except OSError:
-                pass
-        time.sleep(0.05)
-    raise RuntimeError(
-        f"kernel broker did not start; see {log_path(project)}"
-    )
+    """Start the broker, serialized with a lock so two calls cannot race.
+
+    The probe inside the lock retries for a moment on purpose: a connection can
+    be refused for a few milliseconds while a broker that another process just
+    spawned finishes binding, and spawning on that first refusal is exactly how
+    two kernels end up writing the same snapshot.
+    """
+    import fcntl
+
+    lock_file = socket_path(project).with_suffix(".lock")
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_file, "w") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            if _probe(project, 1.5):
+                return  # another process started it while we waited
+            log = open(log_path(project), "ab")
+            subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve()), "serve", "--project", project],
+                cwd=project,
+                stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                start_new_session=True,
+                env=dict(os.environ),
+            )
+            if not _probe(project, START_TIMEOUT):
+                raise RuntimeError(f"kernel broker did not start; see {log_path(project)}")
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 def _lake(project: str) -> ContextLake:
@@ -317,8 +349,15 @@ def cmd_exec(args: list) -> int:
             no_snapshot = True
         elif a in ("-h", "--help"):
             return _usage("exec")
+        elif a.startswith("-"):
+            print(f"rlm exec: unknown option {a}", file=sys.stderr)
+            return _usage("exec")
         else:
-            code = Path(a).read_text()
+            try:
+                code = Path(a).read_text()
+            except OSError as exc:
+                print(f"rlm exec: cannot read {a}: {exc.strerror or exc}", file=sys.stderr)
+                return 2
         i += 1
     if code is None:
         if sys.stdin.isatty():

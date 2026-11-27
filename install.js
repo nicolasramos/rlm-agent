@@ -135,11 +135,19 @@ function serverPath(base) {
  * when the registration ran, false when the user has to run the printed command
  * (or edit the printed config) themselves.
  */
-function registerWithCli(bin, args, manualHint) {
+function registerWithCli(bin, args, manualHint, listArgs) {
   if (!have(bin)) {
     console.log(`  ! ${bin} not found on PATH — register manually:`);
     console.log(`      ${manualHint}`);
     return false;
+  }
+  // Reinstalling must not fail with "already exists" and print a scary warning.
+  if (listArgs) {
+    const listed = spawnSync(bin, listArgs, { encoding: "utf-8" });
+    if (listed.status === 0 && /\brlm\b/.test(listed.stdout)) {
+      console.log(`  ✓ already registered with ${bin}`);
+      return true;
+    }
   }
   const r = spawnSync(bin, args, { stdio: "inherit" });
   if (r.status !== 0) {
@@ -210,6 +218,7 @@ const EDITORS = {
         "claude",
         ["mcp", "add", "--scope", "user", "rlm", "--", pythonBin(), serverPath(base)],
         `claude mcp add --scope user rlm -- ${pythonBin()} ${serverPath(base)}`,
+        ["mcp", "list"],
       );
       installClaudeHooks(base);
     },
@@ -228,6 +237,7 @@ const EDITORS = {
         "codex",
         ["mcp", "add", "rlm", "--", pythonBin(), serverPath(base)],
         `codex mcp add rlm -- ${pythonBin()} ${serverPath(base)}`,
+        ["mcp", "list"],
       );
       if (!registered) upsertCodexToml(base);
     },

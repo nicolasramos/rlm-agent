@@ -78,6 +78,29 @@ class CLITest(unittest.TestCase):
         self.assertEqual(res.returncode, 2)
         self.assertIn("unknown command", res.stderr)
 
+    def test_missing_script_is_a_clean_usage_error(self) -> None:
+        res = self.run_cli("exec", str(self.project / "nope.py"))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("cannot read", res.stderr)
+        self.assertNotIn("Traceback", res.stdout + res.stderr)
+
+    def test_concurrent_first_calls_share_one_kernel(self) -> None:
+        """Six cold callers must end up in one namespace, not six kernels."""
+        procs = [
+            subprocess.Popen(
+                [sys.executable, str(CLI), "exec", "-c", f"k{n} = {n}"],
+                cwd=str(self.project), env=self.env, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            for n in range(6)
+        ]
+        for p in procs:
+            out, err = p.communicate(timeout=120)
+            self.assertEqual(p.returncode, 0, err)
+        listing = self.run_cli("list").stdout
+        for n in range(6):
+            self.assertIn(f"k{n} (int)", listing)
+
     # ── lake ────────────────────────────────────────────────────────────────
     def test_lake_roundtrip_from_the_shell(self) -> None:
         stored = self.run_cli("store", "logs/a", "--text", "uno\nNEEDLE-7A3F\ntres", "--tags", "log,ci")
