@@ -75,7 +75,7 @@ MAX_NAME_REPR_CHARS = 200    # per-name repr in list_names
 # Names the bootstrap re-creates on every start; never snapshotted/listed.
 _ALWAYS_SKIP = {
     "rlm", "mcp", "bash", "asyncio", "In", "Out", "get_ipython",
-    "exit", "quit", "open", "display", "rlm_lake",
+    "exit", "quit", "open", "display", "rlm_lake", "emit",
 }
 
 # ─── Protocol plumbing ────────────────────────────────────────────────────────
